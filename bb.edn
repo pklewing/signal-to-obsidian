@@ -1,0 +1,12 @@
+{:paths ["src" "test"]
+
+ :tasks
+ {run
+  {:doc "Convert a Signal export: bb run <export.jsonl> <out-dir> [--files-root <dir>] [--copy-media]"
+   :requires ([signal-to-obsidian :as sig])
+   :task (sig/-main *command-line-args*)}
+
+  test
+  {:doc "Run the test suite"
+   :requires ([signal-to-obsidian-test :as t])
+   :task (t/run)}}}

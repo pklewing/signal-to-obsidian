@@ -1,0 +1,19 @@
+# Personal Signal data — never commit real exports or generated output
+/obsidian-out/
+*.jsonl
+!test/fixtures/*.jsonl
+
+# Signal backup media directory, if copied alongside
+/files/
+
+# macOS
+.DS_Store
+
+# Editor / tooling
+.clj-kondo/
+.lsp/
+.cpcache/
+*.swp
+
+# Archives (e.g. packaging artifacts)
+*.zip

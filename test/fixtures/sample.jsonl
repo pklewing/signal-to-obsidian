@@ -1,0 +1,12 @@
+{"version":1}
+{"account":{"givenName":"Sam","familyName":"Example"}}
+{"recipient":{"id":"100","self":{},"contact":{"profileGivenName":"Sam","profileFamilyName":"Example"}}}
+{"recipient":{"id":"101","contact":{"profileGivenName":"Alex","profileFamilyName":"Doe","e164":"+10000000101"}}}
+{"recipient":{"id":"102","contact":{"systemFamilyName":"Riley","e164":"+10000000102"}}}
+{"recipient":{"id":"200","group":{"masterKey":"AAAA","snapshot":{"title":{"title":"Weekend Trip"},"members":[{"userId":"AAAA","role":"ADMINISTRATOR"}]}}}}
+{"chat":{"id":"200","recipientId":"200","expireTimerVersion":1}}
+{"chat":{"id":"101","recipientId":"101","expireTimerVersion":1}}
+{"chatItem":{"chatId":"101","authorId":"100","dateSent":"1700000000000","outgoing":{"dateReceived":"1700000000000"},"standardMessage":{"text":{"body":"Hey Alex, are we still on for Saturday?"}}}}
+{"chatItem":{"chatId":"101","authorId":"101","dateSent":"1700000100000","incoming":{"dateReceived":"1700000100000","read":true},"standardMessage":{"text":{"body":"Yes! Looking forward to it."},"reactions":[{"emoji":"\ud83d\udc4d","authorId":"100","sentTimestamp":"1700000200000"}]}}}
+{"chatItem":{"chatId":"200","authorId":"100","dateSent":"1700001000000","outgoing":{"dateReceived":"1700001000000"},"standardMessage":{"text":{"body":"Sharing the itinerary PDF below."},"attachments":[{"pointer":{"contentType":"application/pdf","fileName":"itinerary.pdf","locatorInfo":{"key":"AAAA","size":1420616,"localKey":"nAdZxo2Hgz+hjD9fiffG+SrPZiQbq8tMbP1SlKHRFoG5fiL8v7+v2owFuG9gk8UalI5OQHCtLorkOIyC0/LgrA==","plaintextHash":"7M+2gah3LOVsCOGJJ/x9wy31FGU8fbWp4mNnuMdbFSw="}}}]}}}
+{"chatItem":{"chatId":"200","authorId":"102","dateSent":"1700002000000","incoming":{"dateReceived":"1700002000000","read":true},"standardMessage":{"text":{"body":"Great, thanks for organizing!"}}}}
