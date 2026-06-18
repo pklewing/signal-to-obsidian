@@ -120,7 +120,7 @@
     (is (= "Prof Ile"
            (contact-name {"profileGivenName" "Prof" "profileFamilyName" "Ile"}))))
   (testing "partial names join cleanly without stray spaces"
-    (is (= "Do" (contact-name {"systemFamilyName" "Do"})))
+    (is (= "Jane" (contact-name {"systemFamilyName" "Jane"})))
     (is (= "Solo" (contact-name {"profileGivenName" "Solo"}))))
   (testing "e164 used when no names at all"
     (is (= "491635981282" (contact-name {"e164" "491635981282"}))))
@@ -128,8 +128,8 @@
     (is (= "Unknown" (contact-name {})))))
 
 (deftest group-title-cases
-  (is (= "Do, Peter und wir"
-         (group-title {"snapshot" {"title" {"title" "Do, Peter und wir"}}})))
+  (is (= "Jane, Jim and Sally"
+         (group-title {"snapshot" {"title" {"title" "Jane, Jim and Sally"}}})))
   (is (= "Unknown Group" (group-title {"snapshot" {}})))
   (is (= "Unknown Group" (group-title {}))))
 
@@ -149,11 +149,11 @@
 
 (deftest resolve-author-name-cases
   (let [idx {:recipients {"166" {"self" {} "id" "166"}
-                          "22" {"contact" {"profileGivenName" "Do"} "id" "22"}}
+                          "22" {"contact" {"profileGivenName" "Jane"} "id" "22"}}
              :self-id "166"
              :self-name "Me"}]
     (is (= "Me" (resolve-author-name idx "166")))
-    (is (= "Do" (resolve-author-name idx "22")))
+    (is (= "Jane" (resolve-author-name idx "22")))
     (testing "unknown author id -> User <id>, never throws"
       (is (= "User 999" (resolve-author-name idx "999"))))))
 
@@ -162,7 +162,7 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest sanitize-filename-cases
-  (is (= "Do, Peter und wir" (sanitize-filename "Do, Peter und wir")))
+  (is (= "Jane, Jim and Sally" (sanitize-filename "Jane, Jim and Sally")))
   (testing "illegal filesystem characters stripped (segments fuse, no space inserted)"
     (is (= "abcd" (sanitize-filename "a/b:c*d")))
     (is (= "namepart" (sanitize-filename "name<>:\"/\\|?*part"))))
@@ -192,7 +192,7 @@
                  ;; self recipient carries a fuller name than account.givenName
                  {"recipient" {"id" "166" "self" {}
                                "contact" {"profileGivenName" "Pete" "profileFamilyName" "Stone"}}}
-                 {"recipient" {"id" "22" "contact" {"profileGivenName" "Do"}}}
+                 {"recipient" {"id" "22" "contact" {"profileGivenName" "Jane"}}}
                  {"recipient" {"id" "175" "group" {"snapshot" {"title" {"title" "Grp"}}}}}
                  {"chat" {"id" "175" "recipientId" "175"}}
                  {"chat" {"id" "7" "recipientId" "22"}}
@@ -203,7 +203,7 @@
       (is (= "Pete Stone" (:self-name idx))))
     (is (= "175" (get-in idx [:chats "175"])))
     (is (= "22" (get-in idx [:chats "7"])))
-    (is (= "Do" (contact-name (get-in idx [:recipients "22" "contact"])))))
+    (is (= "Jane" (contact-name (get-in idx [:recipients "22" "contact"])))))
   (testing "falls back to account name when self recipient has no contact name"
     (let [idx (build-indexes [{"account" {"givenName" "Solo" "familyName" "Person"}}
                               {"recipient" {"id" "1" "self" {}}}])]
@@ -246,16 +246,16 @@
 
 (deftest render-chat-item-with-reaction
   (let [idx {:recipients {"166" {"self" {} "id" "166"}
-                          "76" {"contact" {"profileGivenName" "Peter"} "id" "76"}}
+                          "76" {"contact" {"profileGivenName" "Jim"} "id" "76"}}
              :self-id "166" :self-name "Me"}
         ci {"chatId" "175" "authorId" "76" "dateSent" "1781607795234"
             "incoming" {}
-            "standardMessage" {"text" {"body" "Das haben wir"}
+            "standardMessage" {"text" {"body" "Have fun"}
                                "reactions" [{"emoji" "👍" "authorId" "166"
                                              "sentTimestamp" "1781609673539"}]}}
         out (render-chat-item idx {} ci)]
-    (is (str/includes? out "**Peter**"))
-    (is (str/includes? out "Das haben wir"))
+    (is (str/includes? out "**Jim"))
+    (is (str/includes? out "Have fun"))
     (is (str/includes? out "👍 Me"))))
 
 (deftest render-chat-item-unavailable-attachment
@@ -367,8 +367,6 @@
           (is (str/includes? md "application/pdf"))))
       (finally
         (fs/delete-tree out)))))
-
-
 
 (defn run [& _]
   (let [{:keys [fail error]} (run-tests 'signal-to-obsidian-test)]
