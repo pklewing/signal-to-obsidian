@@ -134,18 +134,11 @@
   (.withZone (DateTimeFormatter/ofPattern "yyyy-MM-dd HH:mm")
              (ZoneId/systemDefault)))
 
-(def ^DateTimeFormatter time-only-fmt
-  (.withZone (DateTimeFormatter/ofPattern "HH:mm")
-             (ZoneId/systemDefault)))
-
 (defn parse-millis [s]
   (when s (Long/parseLong (str s))))
 
 (defn fmt-ts [millis]
   (when millis (.format ts-fmt (Instant/ofEpochMilli millis))))
-
-(defn fmt-time [millis]
-  (when millis (.format time-only-fmt (Instant/ofEpochMilli millis))))
 
 ;; ---------------------------------------------------------------------------
 ;; Name resolution
@@ -273,7 +266,7 @@
   [idx file-index ci]
   (let [author (resolve-author-name idx (get ci "authorId"))
         millis (parse-millis (get ci "dateSent"))
-        time (fmt-time millis)
+        time (fmt-ts millis)
         sm (get ci "standardMessage")]
     (when sm
       (let [body (get-in sm ["text" "body"])
