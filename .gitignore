@@ -9,10 +9,14 @@
 # macOS
 .DS_Store
 
-# Editor / tooling
+# Haskell build artifacts
+dist-newstyle/
+*.hi
+*.o
+
+# Editor / tooling (incl. leftover Clojure LSP caches)
 .clj-kondo/
 .lsp/
-.cpcache/
 *.swp
 
 # Archives (e.g. packaging artifacts)

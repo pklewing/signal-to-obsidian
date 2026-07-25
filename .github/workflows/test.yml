@@ -11,10 +11,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Babashka
-        uses: DeLaGuardo/setup-clojure@13.0
+      - name: Set up GHC
+        uses: haskell-actions/setup@v2
+        id: setup
         with:
-          bb: latest
+          ghc-version: '9.10'
+          cabal-version: 'latest'
+
+      - name: Configure
+        run: |
+          cabal configure --enable-tests
+          cabal build --dry-run
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
+          restore-keys: ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-
+
+      - name: Build
+        run: cabal build --enable-tests
 
       - name: Run tests
-        run: bb test
+        run: cabal test --enable-tests --test-show-details=direct

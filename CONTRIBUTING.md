@@ -1,27 +1,16 @@
 # Contributing
 
-Thanks for your interest in contributing! This is a small [Babashka](https://babashka.org/) tool that converts a Signal Desktop local-backup export into Obsidian Markdown. Contributions of all sizes are welcome.
+Thanks for your interest in contributing! This is a small [Haskell](https://www.haskell.org/) tool that converts a Signal Desktop local-backup export into Obsidian Markdown. Contributions of all sizes are welcome.
 
 ## Prerequisites
 
-- [Babashka](https://github.com/babashka/babashka#installation) (`bb`).
-  On macOS: `brew install borkdude/brew/babashka`.
+- GHC (≥ 9.6) and cabal-install, most easily via [GHCup](https://www.haskell.org/ghcup/).
 - Git.
-
-That's it — there's no compile step and no JVM tooling required.
 
 ## Running the tool locally
 
-Via the bb task (recommended):
-
 ```bash
-bb run <export.jsonl> <output-dir> [--files-root <dir>] [--copy-media]
-```
-
-Or run the script directly:
-
-```bash
-bb src/signal_to_obsidian.clj <export.jsonl> <output-dir> [--files-root <dir>] [--copy-media]
+cabal run signal-to-obsidian -- <export.jsonl> <output-dir> [--files-root <dir>] [--copy-media]
 ```
 
 Flags:
@@ -34,10 +23,10 @@ See the [README](README.md) for a fuller description of how the conversion works
 ## Running the tests
 
 ```bash
-bb test
+cabal test
 ```
 
-The suite (`test/signal_to_obsidian_test.clj`) runs against a small synthetic fixture at `test/fixtures/sample.jsonl` and covers the attachment-hash derivation, name resolution, rendering, and an end-to-end pass. CI runs the same `bb test` on every push and pull request.
+The suite (`test/Spec.hs`) runs against a small synthetic fixture at `test/fixtures/sample.jsonl` and covers the attachment-hash derivation, name resolution, rendering, and an end-to-end pass. CI runs the same `cabal test` on every push and pull request.
 
 If you fix a parsing or formatting bug, please add a test that would have caught it.
 
@@ -52,7 +41,7 @@ This is the one rule that really matters for this project:
 ## Pull requests
 
 - Keep changes focused; a short description of what and why is plenty.
-- Make sure `bb test` passes locally before opening the PR.
+- Make sure `cabal test` passes locally before opening the PR.
 - Update the README if you change behavior or flags.
 - Add or update a test for any behavior you change.
 

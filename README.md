@@ -2,7 +2,7 @@
 
 Convert a [Signal Desktop](https://signal.org/) **local backup** export (newline-delimited JSON) into [Obsidian](https://obsidian.md/)-friendly Markdown — one file per conversation, with media embedded inline and reactions rendered in chronological order.
 
-Written in [Babashka](https://babashka.org/) (a fast-starting Clojure scripting runtime), so the whole tool is a single script with no compile step.
+Written in [Haskell](https://www.haskell.org/), built with Cabal.
 
 ## Features
 
@@ -15,17 +15,18 @@ Written in [Babashka](https://babashka.org/) (a fast-starting Clojure scripting 
 
 ## Requirements
 
-- [Babashka](https://github.com/babashka/babashka#installation) (`bb`). On macOS: `brew install borkdude/brew/babashka`.
+- GHC (≥ 9.6) and cabal-install, most easily via [GHCup](https://www.haskell.org/ghcup/).
 - A Signal Desktop local backup, unpacked so you have the `main.jsonl` export and its sibling `files/` directory.
 
 ## Usage
 
 ```bash
-# via the bb task (recommended)
-bb run main.jsonl ./obsidian-out --files-root /path/to/backup --copy-media
+# build and run in one step
+cabal run signal-to-obsidian -- main.jsonl ./obsidian-out --files-root /path/to/backup --copy-media
 
-# or run the script directly
-bb src/signal_to_obsidian.clj main.jsonl ./obsidian-out --files-root /path/to/backup --copy-media
+# or install the binary onto your PATH first
+cabal install
+signal-to-obsidian main.jsonl ./obsidian-out --files-root /path/to/backup --copy-media
 ```
 
 Arguments:
@@ -52,7 +53,7 @@ where `plaintextHash` and `localKey` come from each attachment's `locatorInfo` b
 ## Running the tests
 
 ```bash
-bb test
+cabal test
 ```
 
 The suite covers the hash derivation (with real verified vectors as regression guards), name resolution, extension handling, filename sanitization, index building, reaction ordering, end-to-end rendering, a filesystem round-trip, and an integration pass over a synthetic fixture (`test/fixtures/sample.jsonl`, which contains only fabricated data).

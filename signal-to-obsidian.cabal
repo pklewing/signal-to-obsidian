@@ -1,0 +1,56 @@
+cabal-version:      3.0
+name:               signal-to-obsidian
+version:            0.1.0
+synopsis:           Convert a Signal Desktop local backup export into Obsidian Markdown
+description:        Converts a Signal Desktop "local backup" JSONL export into
+                    Obsidian-friendly Markdown, one file per conversation, with
+                    media embedded as wikilinks and reactions rendered inline.
+license:            MIT
+license-file:       LICENSE
+author:             pklewing
+build-type:         Simple
+extra-doc-files:    README.md
+
+common warnings
+    ghc-options:      -Wall
+    default-language: GHC2021
+
+library
+    import:           warnings
+    hs-source-dirs:   src
+    exposed-modules:  SignalToObsidian
+    build-depends:    base >=4.16 && <5
+                    , aeson >=2.0
+                    , base64-bytestring
+                    , bytestring
+                    , containers
+                    , crypton
+                    , directory
+                    , filepath
+                    , scientific
+                    , text
+                    , time
+
+executable signal-to-obsidian
+    import:           warnings
+    hs-source-dirs:   app
+    main-is:          Main.hs
+    build-depends:    base
+                    , directory
+                    , signal-to-obsidian
+
+test-suite spec
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    hs-source-dirs:   test
+    main-is:          Spec.hs
+    build-depends:    base
+                    , aeson
+                    , bytestring
+                    , containers
+                    , directory
+                    , filepath
+                    , hspec
+                    , signal-to-obsidian
+                    , temporary
+                    , text
