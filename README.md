@@ -42,7 +42,7 @@ Open `<output-dir>` as an Obsidian vault (or drop it inside an existing one) and
 
 ## Output
 
-- **Filenames.** Each note is named after the conversation, with characters that are illegal on common filesystems or that break Obsidian links (`\ / : * ? " < > | # ^ [ ]`) removed, and leading/trailing dots trimmed.
+- **Filenames.** Each note is named after the conversation, with characters that are illegal on common filesystems or that break Obsidian links (`\ / : * ? " < > | # ^ [ ]`) removed, control characters and leading/trailing dots trimmed, and very long names shortened to 200 bytes.
 - **Name collisions.** If several conversations end up with the same name (compared case-insensitively, since macOS and Windows filesystems are case-insensitive), every one of them gets its chat id appended, e.g. `Unknown (10).md` and `Unknown (20).md`, so none overwrite each other.
 - **Summary.** After converting, the tool reports how many attachments were not found under `<files-root>/files/` (rendered as *attachment unavailable* placeholders) and, separately, how many had no locator info at all (skipped).
 
