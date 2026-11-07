@@ -49,6 +49,8 @@ module SignalToObsidian
   , buildIndexes
 
     -- * Rendering
+  , escapeBody
+  , messageCountLine
   , renderReactions
   , renderAttachments
   , renderChatItem
@@ -547,6 +549,37 @@ buildIndexes records =
 -- Rendering
 -- ---------------------------------------------------------------------------
 
+-- | Escape Markdown block syntax at the start of each line of a message body,
+-- so the text renders literally and can't break the note's structure.
+--
+-- Signal bodies are plain text, but a line that starts (after at most three
+-- spaces) with any of these would otherwise be parsed as Markdown:
+--
+-- * @#@          a heading (or an Obsidian tag)
+-- * @```@ / @~~~@  a code fence; unclosed, it swallows the rest of the note
+-- * @<@          an HTML block; an unclosed @<!--@ hides the rest of the note
+-- * only @-@ @*@ @_@ @=@ and spaces: a thematic break, which looks just like
+--   the @---@ separator between messages, or a setext underline that turns
+--   the previous line into a heading
+--
+-- Each such line gets a backslash before its first non-space character.
+-- Everything else (inline formatting, lists, quotes) is left alone.
+escapeBody :: Text -> Text
+escapeBody = T.intercalate "\n" . map escapeLine . T.splitOn "\n"
+  where
+    escapeLine l =
+      let (indent, rest) = T.span (== ' ') l
+          startsBlock = any (`T.isPrefixOf` rest) ["#", "```", "~~~", "<"]
+          ruleLike = not (T.null (T.strip rest)) && T.all (`elem` ("-*_= \t" :: String)) rest
+       in if T.length indent <= 3 && (startsBlock || ruleLike)
+            then indent <> "\\" <> rest
+            else l
+
+-- | The italic count line under a conversation's heading.
+messageCountLine :: Int -> Text
+messageCountLine 1 = "_1 message_"
+messageCountLine n = "_" <> T.pack (show n) <> " messages_"
+
 resolveAuthorName :: Index -> Maybe Text -> Text
 resolveAuthorName idx authorId
   | Just sid <- idxSelfId idx, authorId == Just sid = idxSelfName idx
@@ -593,7 +626,7 @@ renderChatItem idx fileIndex ci = case ciStandardMessage ci of
     time <- traverse fmtTs (ciDateSent ci)
     let author = resolveAuthorName idx (unId <$> ciAuthorId ci)
         headLine = "**" <> author <> "** · " <> fromMaybe "" time
-        bodyLines = [b | Just b <- [smBody sm], not (blank b)]
+        bodyLines = [escapeBody b | Just b <- [smBody sm], not (blank b)]
         attLines = [renderAttachments fileIndex (smAttachments sm) | not (null (smAttachments sm))]
         reactLines = maybe [] pure (renderReactions idx (smReactions sm))
     pure (Just (T.intercalate "\n" (headLine : bodyLines ++ attLines ++ reactLines)))
@@ -778,10 +811,11 @@ convert opts = do
   when (length (List.nub foldedNames) /= length foldedNames) $
     ioError (userError "internal error: could not assign unique note filenames")
   written <- forM (Map.toList (Map.intersectionWith (,) fileNames itemsByChat)) $ \(chatId, (fname, itemsNewestFirst)) -> do
-    let convName = convNameFor chatId
-        n = length itemsNewestFirst
-        header = "# " <> convName <> "\n\n_" <> T.pack (show n) <> " messages_\n"
     blocks <- catMaybes <$> mapM (renderChatItem idx fileIndex) itemsNewestFirst
+    -- count what's rendered, not raw chat items (skipped types aren't shown)
+    let convName = convNameFor chatId
+        n = length blocks
+        header = "# " <> convName <> "\n\n" <> messageCountLine n <> "\n"
     when (optCopyMedia opts) $
       forM_ itemsNewestFirst $ \ci ->
         forM_ (maybe [] smAttachments (ciStandardMessage ci)) $ \att ->

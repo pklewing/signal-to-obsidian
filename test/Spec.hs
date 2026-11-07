@@ -315,6 +315,36 @@ main = hspec $ do
     it "empty reactions -> Nothing" $
       renderReactions idx [] `shouldBe` Nothing
 
+  describe "escapeBody" $ do
+    it "escapes headings, fences and HTML at line start" $ do
+      escapeBody "# not a heading" `shouldBe` "\\# not a heading"
+      escapeBody "#tag" `shouldBe` "\\#tag"
+      escapeBody "```" `shouldBe` "\\```"
+      escapeBody "~~~ code" `shouldBe` "\\~~~ code"
+      escapeBody "<!-- hidden?" `shouldBe` "\\<!-- hidden?"
+    it "escapes rule-like lines (thematic breaks, setext underlines)" $ do
+      escapeBody "---" `shouldBe` "\\---"
+      escapeBody "- - -" `shouldBe` "\\- - -"
+      escapeBody "text\n===" `shouldBe` "text\n\\==="
+      escapeBody "text\n-" `shouldBe` "text\n\\-"
+      escapeBody "***" `shouldBe` "\\***"
+    it "escapes each line independently, keeping up to 3 spaces of indent" $
+      escapeBody "fine\n  ## two\nalso fine" `shouldBe` "fine\n  \\## two\nalso fine"
+    it "leaves ordinary text, inline syntax and lists alone" $ do
+      escapeBody "Hello world" `shouldBe` "Hello world"
+      escapeBody "issue #12 and a<b" `shouldBe` "issue #12 and a<b"
+      escapeBody "- milk\n- eggs" `shouldBe` "- milk\n- eggs"
+      escapeBody "*really* nice" `shouldBe` "*really* nice"
+      escapeBody "" `shouldBe` ""
+    it "4+ spaces of indent is code, not a block start: left alone" $
+      escapeBody "    # x" `shouldBe` "    # x"
+
+  describe "messageCountLine" $ do
+    it "singular and plural" $ do
+      messageCountLine 1 `shouldBe` "_1 message_"
+      messageCountLine 0 `shouldBe` "_0 messages_"
+      messageCountLine 2 `shouldBe` "_2 messages_"
+
   -- -------------------------------------------------------------------------
   -- 8. End-to-end rendering of a chat item
   -- -------------------------------------------------------------------------
@@ -369,6 +399,13 @@ main = hspec $ do
       out `shouldSatisfy` infixOfM "attachment unavailable"
       out `shouldSatisfy` infixOfM "image/jpeg"
       out `shouldSatisfy` (not . infixOfM "![[")
+
+    it "body Markdown block syntax is escaped" $ do
+      let idx = Index Map.empty Map.empty Nothing "Me"
+      out <-
+        renderChatItem idx Map.empty $
+          dec "{\"chatId\":\"1\",\"authorId\":\"5\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"# big\\n---\\nok\"}}}"
+      out `shouldSatisfy` infixOfM "\\# big\n\\---\nok"
 
     it "a chatItem without standardMessage renders nothing" $ do
       let idx = Index Map.empty Map.empty Nothing "Me"
@@ -569,3 +606,21 @@ main = hspec $ do
         s2 <- run tmp out True ["{\"version\":1}"]
         sumPruned s2 `shouldBe` 0
         doesFileExist (out </> "Alex.md") `shouldReturn` True
+
+
+  describe "integration (message count)" $
+    it "header counts rendered messages only, with correct grammar" $
+      withSystemTempDirectory "sig-count-" $ \tmp -> do
+        let inPath = tmp </> "export.jsonl"
+            out = tmp </> "out"
+        BL.writeFile inPath $
+          BL.unlines
+            [ "{\"recipient\":{\"id\":\"1\",\"contact\":{\"profileGivenName\":\"Alex\"}}}"
+            , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"hi\"}}}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"2000\",\"updateMessage\":{\"groupChange\":{}}}}"
+            ]
+        _ <- convert (Options inPath out (Just tmp) False False False)
+        note <- TE.decodeUtf8 <$> BS.readFile (out </> "Alex.md")
+        note `shouldSatisfy` T.isInfixOf "_1 message_"
+        note `shouldSatisfy` (not . T.isInfixOf "_2 messages_")
