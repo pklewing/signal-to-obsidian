@@ -23,7 +23,7 @@ See the [README](README.md) for a fuller description of how the conversion works
 ## Running the tests
 
 ```bash
-cabal test
+cabal test --enable-tests
 ```
 
 The suite (`test/Spec.hs`) runs against a small synthetic fixture at `test/fixtures/sample.jsonl` and covers the attachment-hash derivation, name resolution, rendering, and an end-to-end pass. CI runs the same `cabal test` on every push and pull request.

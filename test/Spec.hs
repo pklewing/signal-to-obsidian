@@ -7,13 +7,14 @@ module Main (main) where
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
+import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import SignalToObsidian
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath (takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
@@ -185,10 +186,57 @@ main = hspec $ do
       sanitizeFilename "name<>:\"/\\|?*part" `shouldBe` "namepart"
     it "whitespace collapsed and trimmed" $
       sanitizeFilename "  a    b  " `shouldBe` "a b"
+    it "Obsidian link syntax characters stripped" $ do
+      sanitizeFilename "Team #1 [old]" `shouldBe` "Team 1 old"
+      sanitizeFilename "^caret" `shouldBe` "caret"
+      sanitizeFilename "a|b" `shouldBe` "ab"
+    it "leading dots stripped so the note isn't hidden" $ do
+      sanitizeFilename ".hidden" `shouldBe` "hidden"
+      sanitizeFilename ". . spaced" `shouldBe` "spaced"
+    it "trailing dots and spaces stripped (Windows rejects them)" $
+      sanitizeFilename "Trip..." `shouldBe` "Trip"
+    it "control characters stripped" $
+      sanitizeFilename "a\x01\&b\x00\&c" `shouldBe` "abc"
+    it "capped at 200 UTF-8 bytes without splitting characters" $ do
+      T.length (sanitizeFilename (T.replicate 300 "x")) `shouldBe` 200
+      sanitizeFilename (T.replicate 150 "\x00e9") `shouldBe` T.replicate 100 "\x00e9"
+    it "inner dots kept" $
+      sanitizeFilename "v1.2 notes" `shouldBe` "v1.2 notes"
     it "empty / all-illegal falls back to a default" $ do
       sanitizeFilename "" `shouldBe` "conversation"
       sanitizeFilename "/////" `shouldBe` "conversation"
       sanitizeFilename "   " `shouldBe` "conversation"
+      sanitizeFilename "..." `shouldBe` "conversation"
+
+  describe "assignFilenames" $ do
+    it "unique names are unchanged" $
+      assignFilenames [("1", "Alex"), ("2", "Weekend Trip")]
+        `shouldBe` Map.fromList [("1", "Alex.md"), ("2", "Weekend Trip.md")]
+    it "identical names -> every one suffixed with its chat id" $
+      assignFilenames [("5", "Unknown"), ("9", "Unknown"), ("3", "Sam")]
+        `shouldBe` Map.fromList [("5", "Unknown (5).md"), ("9", "Unknown (9).md"), ("3", "Sam.md")]
+    it "case-only difference collides (case-insensitive filesystems)" $
+      assignFilenames [("1", "Alex"), ("2", "alex")]
+        `shouldBe` Map.fromList [("1", "Alex (1).md"), ("2", "alex (2).md")]
+    it "names equal only after sanitizing collide" $
+      assignFilenames [("1", "a/b"), ("2", "ab")]
+        `shouldBe` Map.fromList [("1", "ab (1).md"), ("2", "ab (2).md")]
+    it "a real name equal to another chat's suffixed name is suffixed too" $
+      assignFilenames [("5", "Unknown"), ("6", "Unknown"), ("7", "Unknown (5)")]
+        `shouldBe` Map.fromList
+          [("5", "Unknown (5).md"), ("6", "Unknown (6).md"), ("7", "Unknown (5) (7).md")]
+    it "folds case like filesystems do: ß and ss stay distinct" $
+      assignFilenames [("1", "Straße"), ("2", "Strasse")]
+        `shouldBe` Map.fromList [("1", "Straße.md"), ("2", "Strasse.md")]
+    it "suffixed long names stay under the 255-byte filename limit" $ do
+      let long = T.replicate 300 "\x00e9" -- 2 bytes each in UTF-8
+          longId c = T.replicate 60 "9" <> c -- ids are capped in the suffix
+          names = Map.elems (assignFilenames [("123456", long), ("123457", long), (longId "1", long), (longId "2", long)])
+      length names `shouldBe` 4
+      names `shouldSatisfy` all (\n -> BS.length (TE.encodeUtf8 (T.pack n)) <= 255)
+      names `shouldSatisfy` (\ns -> ns == List.nub ns)
+    it "result does not depend on input order" $
+      assignFilenames [("9", "X"), ("1", "x")] `shouldBe` assignFilenames [("1", "x"), ("9", "X")]
 
   -- -------------------------------------------------------------------------
   -- 5. Timestamp parsing (Millis accepts both string and numeric JSON)
@@ -368,10 +416,13 @@ main = hspec $ do
       argPositional a `shouldBe` ["in.jsonl", "out"]
       argFilesRoot a `shouldBe` Just "/b"
       argCopyMedia a `shouldBe` True
+    it "--prune flag" $
+      argPrune (parseArgs ["in.jsonl", "out", "--prune"]) `shouldBe` True
     it "defaults" $ do
       let a = parseArgs ["in.jsonl", "out"]
       argFilesRoot a `shouldBe` Nothing
       argCopyMedia a `shouldBe` False
+      argPrune a `shouldBe` False
 
   -- -------------------------------------------------------------------------
   -- 11. End-to-end integration: convert the bundled fixture.
@@ -388,11 +439,13 @@ main = hspec $ do
               , optOutDir = out
               , optFilesRoot = Just out
               , optCopyMedia = False
+              , optPrune = False
               , optVerbose = False
               }
         -- convert returns a summary
         sumConversations summary `shouldBe` 2
         sumMissing summary `shouldBe` 1 -- the one PDF attachment, no files/ present
+        sumNoLocator summary `shouldBe` 0 -- the fixture's only attachment has locator info
         -- expected per-conversation files are written
         doesFileExist (out </> "Alex Doe.md") `shouldReturn` True
         doesFileExist (out </> "Weekend Trip.md") `shouldReturn` True
@@ -411,3 +464,108 @@ main = hspec $ do
         grp `shouldSatisfy` T.isInfixOf "**Riley**" -- systemFamilyName
         grp `shouldSatisfy` T.isInfixOf "attachment unavailable"
         grp `shouldSatisfy` T.isInfixOf "application/pdf"
+
+  describe "integration (name collisions)" $
+    it "two chats whose names both resolve to Unknown get separate files" $
+      withSystemTempDirectory "sig-coll-" $ \tmp -> do
+        let inPath = tmp </> "export.jsonl"
+            out = tmp </> "out"
+        BL.writeFile inPath $
+          BL.unlines
+            [ "{\"recipient\":{\"id\":\"1\",\"contact\":{}}}"
+            , "{\"recipient\":{\"id\":\"2\",\"contact\":{}}}"
+            , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
+            , "{\"chat\":{\"id\":\"20\",\"recipientId\":\"2\"}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"first\"}}}}"
+            , "{\"chatItem\":{\"chatId\":\"20\",\"authorId\":\"2\",\"dateSent\":\"2000\",\"standardMessage\":{\"text\":{\"body\":\"second\"}}}}"
+            ]
+        summary <- convert (Options inPath out (Just tmp) False False False)
+        sumConversations summary `shouldBe` 2
+        doesFileExist (out </> "Unknown.md") `shouldReturn` False
+        a <- TE.decodeUtf8 <$> BS.readFile (out </> "Unknown (10).md")
+        b <- TE.decodeUtf8 <$> BS.readFile (out </> "Unknown (20).md")
+        a `shouldSatisfy` T.isInfixOf "first"
+        b `shouldSatisfy` T.isInfixOf "second"
+
+  describe "integration (attachment counting)" $
+    it "attachment without locatorInfo counts as no-locator, not missing" $
+      withSystemTempDirectory "sig-loc-" $ \tmp -> do
+        let inPath = tmp </> "export.jsonl"
+        BL.writeFile inPath $
+          BL.unlines
+            [ "{\"recipient\":{\"id\":\"1\",\"contact\":{\"profileGivenName\":\"Alex\"}}}"
+            , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"1000\",\"standardMessage\":{\"attachments\":[{\"pointer\":{\"contentType\":\"image/png\"}}]}}}"
+            ]
+        summary <- convert (Options inPath (tmp </> "out") (Just tmp) False False False)
+        sumMissing summary `shouldBe` 0
+        sumNoLocator summary `shouldBe` 1
+
+  describe "staleNotes" $ do
+    it "previous notes not written now are stale" $
+      staleNotes ["Alex.md", "Sam.md"] ["Alex (10).md", "Alex (31).md", "Sam.md"]
+        `shouldBe` ["Alex.md"]
+    it "case-only differences are kept (same file on macOS/Windows)" $
+      staleNotes ["alex.md"] ["Alex.md"] `shouldBe` []
+    it "never touches paths, dotfiles, or non-.md entries" $
+      staleNotes ["../x.md", "sub/x.md", ".hidden.md", "notes.txt", ".md", "ok.md"] []
+        `shouldBe` ["ok.md"]
+
+  describe "integration (--prune)" $ do
+    let chat name cid rid =
+          [ "{\"recipient\":{\"id\":\"" <> rid <> "\",\"contact\":{\"profileGivenName\":\"" <> name <> "\"}}}"
+          , "{\"chat\":{\"id\":\"" <> cid <> "\",\"recipientId\":\"" <> rid <> "\"}}"
+          , "{\"chatItem\":{\"chatId\":\"" <> cid <> "\",\"authorId\":\"" <> rid <> "\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"hi\"}}}}"
+          ]
+        run tmp out prune ls = do
+          let inPath = tmp </> "export.jsonl"
+          BL.writeFile inPath (BL.unlines ls)
+          convert (Options inPath out (Just tmp) False prune False)
+    it "removes notes renamed by collision suffixing, keeps the user's own notes" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        writeFile (out </> "My own note.md") "mine"
+        s2 <- run tmp out True (chat "Alex" "10" "1" <> chat "Alex" "31" "2")
+        sumPruned s2 `shouldBe` 1
+        doesFileExist (out </> "Alex.md") `shouldReturn` False
+        doesFileExist (out </> "Alex (10).md") `shouldReturn` True
+        doesFileExist (out </> "Alex (31).md") `shouldReturn` True
+        doesFileExist (out </> "My own note.md") `shouldReturn` True
+    it "without --prune nothing is deleted, but a later --prune still cleans up" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+            two = chat "Alex" "10" "1" <> chat "Alex" "31" "2"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        s2 <- run tmp out False two
+        sumPruned s2 `shouldBe` 0
+        doesFileExist (out </> "Alex.md") `shouldReturn` True
+        s3 <- run tmp out True two
+        sumPruned s3 `shouldBe` 1
+        files <- listDirectory out
+        files `shouldSatisfy` notElem "Alex.md"
+    it "never deletes a stale note the user has edited" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        appendFile (out </> "Alex.md") "\nmy annotation\n"
+        s2 <- run tmp out True (chat "Alex" "10" "1" <> chat "Alex" "31" "2")
+        sumPruned s2 `shouldBe` 0
+        doesFileExist (out </> "Alex.md") `shouldReturn` True
+    it "never deletes a user note that reuses a stale note's name" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+            two = chat "Alex" "10" "1" <> chat "Alex" "31" "2"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        _ <- run tmp out False two -- Alex.md now stale, still tracked
+        writeFile (out </> "Alex.md") "my own note"
+        s3 <- run tmp out True two
+        sumPruned s3 `shouldBe` 0
+        readFile (out </> "Alex.md") `shouldReturn` "my own note"
+    it "refuses to prune when the run wrote no notes" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        s2 <- run tmp out True ["{\"version\":1}"]
+        sumPruned s2 `shouldBe` 0
+        doesFileExist (out </> "Alex.md") `shouldReturn` True

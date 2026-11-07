@@ -1,7 +1,7 @@
 -- | Thin CLI wrapper around 'SignalToObsidian.convert'.
 --
 -- Usage:
---   signal-to-obsidian <export.jsonl> <output-dir> [--files-root <dir>] [--copy-media]
+--   signal-to-obsidian <export.jsonl> <output-dir> [--files-root <dir>] [--copy-media] [--prune]
 module Main (main) where
 
 import Control.Monad (unless, void)
@@ -12,7 +12,7 @@ import System.Exit (ExitCode (ExitFailure), exitWith)
 import System.IO (hSetEncoding, stderr, stdout, utf8)
 
 usage :: String
-usage = "Usage: signal-to-obsidian <export.jsonl> <output-dir> [--files-root <dir>] [--copy-media]"
+usage = "Usage: signal-to-obsidian <export.jsonl> <output-dir> [--files-root <dir>] [--copy-media] [--prune]"
 
 main :: IO ()
 main = do
@@ -32,6 +32,7 @@ main = do
             , optOutDir = outDir
             , optFilesRoot = argFilesRoot args
             , optCopyMedia = argCopyMedia args
+            , optPrune = argPrune args
             , optVerbose = True
             }
     _ -> do

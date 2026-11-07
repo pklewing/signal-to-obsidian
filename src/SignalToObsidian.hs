@@ -42,6 +42,7 @@ module SignalToObsidian
 
     -- * Filenames
   , sanitizeFilename
+  , assignFilenames
 
     -- * Index building
   , Index (..)
@@ -52,6 +53,10 @@ module SignalToObsidian
   , renderAttachments
   , renderChatItem
 
+    -- * Stale-note pruning
+  , manifestFileName
+  , staleNotes
+
     -- * CLI / conversion
   , Args (..)
   , parseArgs
@@ -60,6 +65,7 @@ module SignalToObsidian
   , convert
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import qualified Data.Aeson as A
@@ -67,17 +73,18 @@ import Data.Aeson (FromJSON (..), withObject, (.!=), (.:?))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as BC
-import Data.Char (isSpace)
-import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.Char (isControl, isSpace)
 import Data.List (isPrefixOf, sortOn)
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Scientific (floatingOrInteger)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+import Data.Text.Encoding.Error (lenientDecode)
 import Data.Time.Clock (UTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.Time.Format (defaultTimeLocale, formatTime)
@@ -90,6 +97,7 @@ import System.Directory
   , doesPathExist
   , listDirectory
   , makeAbsolute
+  , removeFile
   )
 import System.FilePath (dropExtension, takeDirectory, takeFileName, (</>))
 import Text.Printf (printf)
@@ -421,11 +429,77 @@ recipientDisplayName r selfName
 -- Filesystem-safe filenames
 -- ---------------------------------------------------------------------------
 
+-- | Characters removed from note names: control characters, those illegal on
+-- common filesystems, and those Obsidian can't link to (@#@ heading, @^@ block
+-- ref, @[@ @]@ wikilink, @|@ alias).
+unsafeFilenameChar :: Char -> Bool
+unsafeFilenameChar c = isControl c || c `elem` ("\\/:*?\"<>|#^[]" :: String)
+
+-- | Longest sanitized name, in UTF-8 bytes. Leaves room under the common
+-- 255-byte filename limit for a collision suffix and the @.md@ extension.
+maxNameBytes :: Int
+maxNameBytes = 200
+
+-- | Make a display name safe as both a filename and an Obsidian note name.
+--
+-- Strips 'unsafeFilenameChar's, collapses whitespace, drops leading dots (they
+-- hide the note in Obsidian) and trailing dots/spaces (rejected by Windows),
+-- and caps the length at 'maxNameBytes'. Falls back to @"conversation"@.
 sanitizeFilename :: Text -> Text
 sanitizeFilename s =
-  let legal = T.filter (`notElem` ("\\/:*?\"<>|" :: String)) s -- chars illegal on common FS
+  let legal = T.filter (not . unsafeFilenameChar) s
       collapsed = T.unwords (T.words legal) -- collapse whitespace + trim
-   in if T.null collapsed then "conversation" else collapsed
+      dotOrSpace c = c == '.' || isSpace c
+      trimmed = T.dropWhileEnd dotOrSpace (T.dropWhile dotOrSpace collapsed)
+      capped = T.dropWhileEnd dotOrSpace (takeUtf8Bytes maxNameBytes trimmed)
+   in if T.null capped then "conversation" else capped
+
+-- | Longest prefix whose UTF-8 encoding fits in @n@ bytes (never splits a char).
+takeUtf8Bytes :: Int -> Text -> Text
+takeUtf8Bytes n t
+  | BS.length (TE.encodeUtf8 t) <= n = t
+  | otherwise = T.pack (go 0 (T.unpack t))
+  where
+    go _ [] = []
+    go acc (c : cs) =
+      let w = BS.length (TE.encodeUtf8 (T.singleton c))
+       in if acc + w > n then [] else c : go (acc + w) cs
+
+-- | Assign every chat a unique output filename (with @.md@), keyed by chat id.
+--
+-- Input is @(chatId, displayName)@. Names are compared case-insensitively
+-- (after sanitizing, via 'T.toLower': simple per-character folding as
+-- filesystems do, so e.g. @ß@ and @ss@ stay distinct) because macOS and
+-- Windows filesystems are case-insensitive by default. A name used by exactly one chat is kept as-is;
+-- when several chats share a name, /every/ one of them gets a
+-- @" (\<chatId\>)"@ suffix, so the result does not depend on input order.
+-- Suffixing repeats until no clashes remain, which also covers a chat whose
+-- real name happens to equal another chat's suffixed name.
+--
+-- Known limitation: Unicode normalization (NFC vs NFD) is not considered.
+assignFilenames :: [(Text, Text)] -> Map Text FilePath
+assignFilenames chats = go Set.empty
+  where
+    base = Map.fromList [(cid, sanitizeFilename name) | (cid, name) <- chats]
+    nameFor suffixed cid b
+      -- suffix appended after sanitizing, so the length cap can't cut it off
+      | cid `Set.member` suffixed = b <> " (" <> idTag cid <> ")"
+      | otherwise = b
+    -- Signal chat ids are short numbers; anything over 40 chars is shortened
+    -- to a prefix plus a hash of the full id, which stays bounded and unique.
+    idTag cid =
+      let clean = T.filter (not . unsafeFilenameChar) cid
+       in if T.length clean <= 40 && clean == cid
+            then cid
+            else T.take 31 clean <> "-" <> T.take 8 (sha256Hex (TE.encodeUtf8 cid))
+    go suffixed =
+      let named = Map.mapWithKey (nameFor suffixed) base
+          groups = Map.fromListWith (<>) [(T.toLower n, [cid]) | (cid, n) <- Map.toList named]
+          clashing = Set.fromList (concat (filter ((> 1) . length) (Map.elems groups)))
+          new = clashing `Set.difference` suffixed
+       in if Set.null new
+            then Map.map (\n -> T.unpack n <> ".md") named
+            else go (suffixed <> new)
 
 -- ---------------------------------------------------------------------------
 -- First pass: build lookup tables
@@ -525,6 +599,88 @@ renderChatItem idx fileIndex ci = case ciStandardMessage ci of
     pure (Just (T.intercalate "\n" (headLine : bodyLines ++ attLines ++ reactLines)))
 
 -- ---------------------------------------------------------------------------
+-- Stale-note pruning
+--
+-- Every run records the notes it generated, with a SHA-256 of their content,
+-- in a hidden manifest in the output dir. With --prune, notes listed by an
+-- earlier run but not written by this one (e.g. renamed by collision
+-- suffixing) are deleted -- but only if the file still has exactly the
+-- content the tool wrote. Anything else (the user's own notes, or generated
+-- notes the user has edited) is never deleted.
+-- ---------------------------------------------------------------------------
+
+-- | Hidden (dotfile, so Obsidian ignores it) list of generated notes.
+manifestFileName :: FilePath
+manifestFileName = ".signal-to-obsidian-manifest"
+
+-- | Notes from a previous manifest that may be deleted now, given the notes
+-- this run wrote. Only plain @*.md@ names (no directories, no dotfiles) are
+-- eligible, so a corrupted or tampered manifest can't reach outside the
+-- output dir. Names equal to a written note case-insensitively are kept:
+-- on macOS/Windows they are the same file as the freshly written note.
+staleNotes :: [FilePath] -> [FilePath] -> [FilePath]
+staleNotes previous written = List.nub (filter deletable previous)
+  where
+    writtenFolded = Set.fromList (map (T.toLower . T.pack) written)
+    deletable f =
+      takeFileName f == f
+        && not ("." `isPrefixOf` f)
+        && ".md" `List.isSuffixOf` f
+        && length f > length (".md" :: String)
+        && not (T.toLower (T.pack f) `Set.member` writtenFolded)
+
+-- | Manifest lines are @\<sha256 hex\>\\t\<note filename\>@; malformed lines are ignored.
+readManifest :: FilePath -> IO [(FilePath, Text)]
+readManifest path = do
+  exists <- doesFileExist path
+  if not exists
+    then pure []
+    else do
+      raw <- BS.readFile path
+      pure
+        [ (T.unpack (T.drop 1 name), h)
+        | l <- T.lines (TE.decodeUtf8With lenientDecode raw)
+        , let (h, name) = T.breakOn "\t" l
+        , T.length h == 64
+        , T.length name > 1
+        ]
+
+writeManifest :: FilePath -> [(FilePath, Text)] -> IO ()
+writeManifest path entries =
+  BS.writeFile path . TE.encodeUtf8 . T.unlines $
+    [h <> "\t" <> T.pack f | (f, h) <- List.sortOn fst entries]
+
+data PruneOutcome = Pruned | Tracked (FilePath, Text) | Forgotten
+
+-- | Decide the fate of one stale manifest entry; deletes it only when
+-- pruning and the file is byte-identical to what the tool wrote.
+pruneEntry :: Bool -> Bool -> FilePath -> (FilePath, Text) -> IO PruneOutcome
+pruneEntry doPrune verbose outDir entry@(f, h) = do
+  let path = outDir </> f
+  exists <- doesFileExist path
+  if not exists
+    then pure Forgotten -- already gone
+    else do
+      current <- sha256Hex <$> BS.readFile path
+      if current /= h
+        then do
+          -- edited or replaced by the user: no longer ours, never delete
+          when (doPrune && verbose) $ printf "Kept %s (modified since generated; no longer tracked)\n" f
+          pure Forgotten
+        else
+          if not doPrune
+            then pure (Tracked entry) -- remember it so a later --prune can remove it
+            else do
+              r <- try (removeFile path)
+              case r of
+                Right () -> do
+                  when verbose $ printf "Pruned stale %s\n" f
+                  pure Pruned
+                Left (e :: IOException) -> do
+                  printf "Warning: could not prune %s: %s\n" f (show e)
+                  pure (Tracked entry)
+
+-- ---------------------------------------------------------------------------
 -- CLI / conversion
 -- ---------------------------------------------------------------------------
 
@@ -532,17 +688,19 @@ data Args = Args
   { argPositional :: [String]
   , argFilesRoot :: Maybe FilePath
   , argCopyMedia :: Bool
+  , argPrune :: Bool
   }
   deriving (Show, Eq)
 
 parseArgs :: [String] -> Args
-parseArgs = go (Args [] Nothing False)
+parseArgs = go (Args [] Nothing False False)
   where
     go acc [] = acc {argPositional = reverse (argPositional acc)}
     go acc ("--files-root" : rest) = case rest of
       (v : rs) -> go acc {argFilesRoot = Just v} rs
       [] -> go acc {argFilesRoot = Nothing} []
     go acc ("--copy-media" : rs) = go acc {argCopyMedia = True} rs
+    go acc ("--prune" : rs) = go acc {argPrune = True} rs
     go acc (x : rs) = go acc {argPositional = x : argPositional acc} rs
 
 data Options = Options
@@ -550,14 +708,22 @@ data Options = Options
   , optOutDir :: FilePath
   , optFilesRoot :: Maybe FilePath
   , optCopyMedia :: Bool
+  , optPrune :: Bool
+  -- ^ delete notes generated by an earlier run that this run no longer writes
   , optVerbose :: Bool
   }
   deriving (Show)
 
 data Summary = Summary
-  { sumConversations :: Int
-  , sumMissing :: Int
-  , sumIndexed :: Int
+  { sumConversations :: !Int
+  , sumMissing :: !Int
+  -- ^ attachments with a derivable hash but no file in the index
+  -- (rendered as an "attachment unavailable" placeholder)
+  , sumNoLocator :: !Int
+  -- ^ attachments without locator info, so no derivable hash (not rendered)
+  , sumIndexed :: !Int
+  , sumPruned :: !Int
+  -- ^ stale notes deleted (always 0 unless 'optPrune')
   }
   deriving (Show, Eq)
 
@@ -592,40 +758,81 @@ convert opts = do
           )
           Map.empty
           records
-  missingRef <- newIORef (0 :: Int)
-  forM_ (Map.toList itemsByChat) $ \(chatId, itemsNewestFirst) -> do
-    let mRecipient = Map.lookup chatId (idxChats idx) >>= (`Map.lookup` idxRecipients idx)
-        convName = case mRecipient of
+      convNameFor chatId =
+        case Map.lookup chatId (idxChats idx) >>= (`Map.lookup` idxRecipients idx) of
           Just r -> recipientDisplayName r (idxSelfName idx)
           Nothing -> "chat-" <> chatId
-        fname = T.unpack (sanitizeFilename convName) <> ".md"
+      -- resolve all filenames up front so same-named chats can't overwrite each other
+      fileNames = assignFilenames [(c, convNameFor c) | c <- Map.keys itemsByChat]
+      foldedNames = map (T.toLower . T.pack) (Map.elems fileNames)
+      allAttachments =
+        [ att
+        | items <- Map.elems itemsByChat
+        , ci <- items
+        , att <- maybe [] smAttachments (ciStandardMessage ci)
+        ]
+      hashes = map attachmentHash allAttachments
+      noLocator = length (filter isNothing hashes)
+      missing = length [() | Just h <- hashes, not (Map.member h fileIndex)]
+  -- assignFilenames should make this impossible; never silently overwrite
+  when (length (List.nub foldedNames) /= length foldedNames) $
+    ioError (userError "internal error: could not assign unique note filenames")
+  written <- forM (Map.toList (Map.intersectionWith (,) fileNames itemsByChat)) $ \(chatId, (fname, itemsNewestFirst)) -> do
+    let convName = convNameFor chatId
         n = length itemsNewestFirst
         header = "# " <> convName <> "\n\n_" <> T.pack (show n) <> " messages_\n"
     blocks <- catMaybes <$> mapM (renderChatItem idx fileIndex) itemsNewestFirst
-    forM_ itemsNewestFirst $ \ci ->
-      forM_ (maybe [] smAttachments (ciStandardMessage ci)) $ \att ->
-        case resolveOnDisk fileIndex att of
-          Nothing -> modifyIORef' missingRef (+ 1)
-          Just src -> when (optCopyMedia opts) $ do
+    when (optCopyMedia opts) $
+      forM_ itemsNewestFirst $ \ci ->
+        forM_ (maybe [] smAttachments (ciStandardMessage ci)) $ \att ->
+          forM_ (resolveOnDisk fileIndex att) $ \src -> do
             let h = fromMaybe "" (attachmentHash att)
                 dst = outDir </> "files" </> T.unpack (T.take 2 h) </> takeFileName src
             createDirectoryIfMissing True (takeDirectory dst)
             dstExists <- doesPathExist dst
             unless dstExists $ copyFile src dst
     let content = header <> "\n" <> T.intercalate "\n\n---\n\n" blocks <> "\n"
-    BS.writeFile (outDir </> fname) (TE.encodeUtf8 content)
+        bytes = TE.encodeUtf8 content
+    BS.writeFile (outDir </> fname) bytes
     when (optVerbose opts) $ printf "Wrote %s  (%d messages)\n" fname n
-  missing <- readIORef missingRef
+    pure (fname, sha256Hex bytes)
+  -- Prune stale notes, then record what's ours.
+  let manifestPath = outDir </> manifestFileName
+      writtenNames = map fst written
+      writtenFolded = Set.fromList (map (T.toLower . T.pack) writtenNames)
+      -- a run that wrote nothing is almost certainly a wrong/empty export
+      doPrune = optPrune opts && not (null written)
+  when (optPrune opts && null written && optVerbose opts) $
+    printf "Not pruning: this run wrote no notes (empty or wrong export?).\n"
+  previous <- readManifest manifestPath
+  let staleSet = Set.fromList (staleNotes (map fst previous) writtenNames)
+      stale = [e | e@(f, _) <- previous, f `Set.member` staleSet]
+      -- case-only variants of a written note: same file on macOS/Windows, so
+      -- never deleted, but kept tracked rather than orphaned on Linux
+      caseVariants =
+        [ e
+        | e@(f, _) <- previous
+        , f `notElem` writtenNames
+        , T.toLower (T.pack f) `Set.member` writtenFolded
+        ]
+  outcomes <- mapM (pruneEntry doPrune (optVerbose opts) outDir) stale
+  let pruned = length [() | Pruned <- outcomes]
+      tracked = [e | Tracked e <- outcomes]
+  writeManifest manifestPath (written <> tracked <> caseVariants)
   when (optVerbose opts) $ do
     printf "\nDone. %d conversation file(s) in %s\n" (Map.size itemsByChat) outDir
     when (missing > 0) $
       printf
-        "Note: %d attachment file(s) referenced were not found under %s/files/ — links are still written.\n"
+        "Note: %d attachment(s) were not found under %s/files/ and are shown as \"attachment unavailable\" placeholders.\n"
         missing
         filesRoot
+    when (noLocator > 0) $
+      printf "Note: %d attachment(s) had no locator info and were skipped.\n" noLocator
   pure
     Summary
       { sumConversations = Map.size itemsByChat
       , sumMissing = missing
+      , sumNoLocator = noLocator
       , sumIndexed = Map.size fileIndex
+      , sumPruned = pruned
       }
