@@ -17,6 +17,7 @@ import SignalToObsidian
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath (takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
+import Control.Exception (IOException)
 import Test.Hspec
 
 -- Decode a JSON literal into one of the export record types. The literals in
@@ -655,3 +656,34 @@ main = hspec $ do
         -- the empty chat neither gets a note nor forces a suffix on the real one
         doesFileExist (out </> "Alex.md") `shouldReturn` True
         doesFileExist (out </> "Alex (20).md") `shouldReturn` False
+
+  describe "readExport" $ do
+    it "streams records into the index and per-chat items, newest first" $
+      withSystemTempDirectory "sig-read-" $ \tmp -> do
+        let path = tmp </> "e.jsonl"
+        BL.writeFile path $
+          BL.unlines
+            [ "{\"recipient\":{\"id\":\"1\",\"contact\":{\"profileGivenName\":\"Alex\"}}}"
+            , ""
+            , "   "
+            , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"dateSent\":\"1\",\"standardMessage\":{\"text\":{\"body\":\"old\"}}}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"dateSent\":\"2\",\"updateMessage\":{}}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"dateSent\":\"3\",\"standardMessage\":{\"text\":{\"body\":\"new\"}}}}"
+            ]
+        (idx, items) <- readExport path
+        Map.lookup "10" (idxChats idx) `shouldBe` Just "1"
+        -- blank lines skipped, non-standard items dropped, newest first
+        fmap (map ciDateSent) (Map.lookup "10" items)
+          `shouldBe` Just [Just (Millis 3), Just (Millis 1)]
+    it "reports the line number of a malformed line" $
+      withSystemTempDirectory "sig-read-" $ \tmp -> do
+        let path = tmp </> "e.jsonl"
+        BL.writeFile path (BL.unlines ["{\"version\":1}", "", "{not json"])
+        readExport path `shouldThrow` (\e -> ":3:" `List.isInfixOf` show (e :: IOException))
+    it "tolerates CRLF line endings" $
+      withSystemTempDirectory "sig-read-" $ \tmp -> do
+        let path = tmp </> "e.jsonl"
+        BL.writeFile path "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}\r\n{\"version\":1}\r\n"
+        (idx, _) <- readExport path
+        Map.lookup "10" (idxChats idx) `shouldBe` Just "1"

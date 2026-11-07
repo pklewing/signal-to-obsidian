@@ -14,9 +14,7 @@ dist-newstyle/
 *.hi
 *.o
 
-# Editor / tooling (incl. leftover Clojure LSP caches)
-.clj-kondo/
-.lsp/
+# Editor / tooling
 *.swp
 
 # Archives (e.g. packaging artifacts)
