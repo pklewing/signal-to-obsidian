@@ -42,6 +42,7 @@ module SignalToObsidian
 
     -- * Filenames
   , sanitizeFilename
+  , assignFilenames
 
     -- * Index building
   , Index (..)
@@ -75,6 +76,7 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
 import Data.Scientific (floatingOrInteger)
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -427,6 +429,33 @@ sanitizeFilename s =
       collapsed = T.unwords (T.words legal) -- collapse whitespace + trim
    in if T.null collapsed then "conversation" else collapsed
 
+-- | Assign every chat a unique output filename (with @.md@), keyed by chat id.
+--
+-- Input is @(chatId, displayName)@. Names are compared case-insensitively
+-- (after sanitizing) because macOS and Windows filesystems are
+-- case-insensitive by default. A name used by exactly one chat is kept as-is;
+-- when several chats share a name, /every/ one of them gets a
+-- @" (\<chatId\>)"@ suffix, so the result does not depend on input order.
+-- Suffixing repeats until no clashes remain, which also covers a chat whose
+-- real name happens to equal another chat's suffixed name.
+--
+-- Known limitation: Unicode normalization (NFC vs NFD) is not considered.
+assignFilenames :: [(Text, Text)] -> Map Text FilePath
+assignFilenames chats = go Set.empty
+  where
+    base = Map.fromList [(cid, sanitizeFilename name) | (cid, name) <- chats]
+    nameFor suffixed cid b
+      | cid `Set.member` suffixed = sanitizeFilename (b <> " (" <> cid <> ")")
+      | otherwise = b
+    go suffixed =
+      let named = Map.mapWithKey (nameFor suffixed) base
+          groups = Map.fromListWith (<>) [(T.toCaseFold n, [cid]) | (cid, n) <- Map.toList named]
+          clashing = Set.fromList (concat (filter ((> 1) . length) (Map.elems groups)))
+          new = clashing `Set.difference` suffixed
+       in if Set.null new
+            then Map.map (\n -> T.unpack n <> ".md") named
+            else go (suffixed <> new)
+
 -- ---------------------------------------------------------------------------
 -- First pass: build lookup tables
 -- ---------------------------------------------------------------------------
@@ -592,13 +621,16 @@ convert opts = do
           )
           Map.empty
           records
-  missingRef <- newIORef (0 :: Int)
-  forM_ (Map.toList itemsByChat) $ \(chatId, itemsNewestFirst) -> do
-    let mRecipient = Map.lookup chatId (idxChats idx) >>= (`Map.lookup` idxRecipients idx)
-        convName = case mRecipient of
+      convNameFor chatId =
+        case Map.lookup chatId (idxChats idx) >>= (`Map.lookup` idxRecipients idx) of
           Just r -> recipientDisplayName r (idxSelfName idx)
           Nothing -> "chat-" <> chatId
-        fname = T.unpack (sanitizeFilename convName) <> ".md"
+      -- resolve all filenames up front so same-named chats can't overwrite each other
+      fileNames = assignFilenames [(c, convNameFor c) | c <- Map.keys itemsByChat]
+  missingRef <- newIORef (0 :: Int)
+  forM_ (Map.toList itemsByChat) $ \(chatId, itemsNewestFirst) -> do
+    let convName = convNameFor chatId
+        fname = Map.findWithDefault (T.unpack (sanitizeFilename convName) <> ".md") chatId fileNames
         n = length itemsNewestFirst
         header = "# " <> convName <> "\n\n_" <> T.pack (show n) <> " messages_\n"
     blocks <- catMaybes <$> mapM (renderChatItem idx fileIndex) itemsNewestFirst

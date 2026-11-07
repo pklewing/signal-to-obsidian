@@ -190,6 +190,26 @@ main = hspec $ do
       sanitizeFilename "/////" `shouldBe` "conversation"
       sanitizeFilename "   " `shouldBe` "conversation"
 
+  describe "assignFilenames" $ do
+    it "unique names are unchanged" $
+      assignFilenames [("1", "Alex"), ("2", "Weekend Trip")]
+        `shouldBe` Map.fromList [("1", "Alex.md"), ("2", "Weekend Trip.md")]
+    it "identical names -> every one suffixed with its chat id" $
+      assignFilenames [("5", "Unknown"), ("9", "Unknown"), ("3", "Sam")]
+        `shouldBe` Map.fromList [("5", "Unknown (5).md"), ("9", "Unknown (9).md"), ("3", "Sam.md")]
+    it "case-only difference collides (case-insensitive filesystems)" $
+      assignFilenames [("1", "Alex"), ("2", "alex")]
+        `shouldBe` Map.fromList [("1", "Alex (1).md"), ("2", "alex (2).md")]
+    it "names equal only after sanitizing collide" $
+      assignFilenames [("1", "a/b"), ("2", "ab")]
+        `shouldBe` Map.fromList [("1", "ab (1).md"), ("2", "ab (2).md")]
+    it "a real name equal to another chat's suffixed name is suffixed too" $
+      assignFilenames [("5", "Unknown"), ("6", "Unknown"), ("7", "Unknown (5)")]
+        `shouldBe` Map.fromList
+          [("5", "Unknown (5).md"), ("6", "Unknown (6).md"), ("7", "Unknown (5) (7).md")]
+    it "result does not depend on input order" $
+      assignFilenames [("9", "X"), ("1", "x")] `shouldBe` assignFilenames [("1", "x"), ("9", "X")]
+
   -- -------------------------------------------------------------------------
   -- 5. Timestamp parsing (Millis accepts both string and numeric JSON)
   -- -------------------------------------------------------------------------
@@ -411,3 +431,25 @@ main = hspec $ do
         grp `shouldSatisfy` T.isInfixOf "**Riley**" -- systemFamilyName
         grp `shouldSatisfy` T.isInfixOf "attachment unavailable"
         grp `shouldSatisfy` T.isInfixOf "application/pdf"
+
+  describe "integration (name collisions)" $
+    it "two chats whose names both resolve to Unknown get separate files" $
+      withSystemTempDirectory "sig-coll-" $ \tmp -> do
+        let inPath = tmp </> "export.jsonl"
+            out = tmp </> "out"
+        BL.writeFile inPath $
+          BL.unlines
+            [ "{\"recipient\":{\"id\":\"1\",\"contact\":{}}}"
+            , "{\"recipient\":{\"id\":\"2\",\"contact\":{}}}"
+            , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
+            , "{\"chat\":{\"id\":\"20\",\"recipientId\":\"2\"}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"first\"}}}}"
+            , "{\"chatItem\":{\"chatId\":\"20\",\"authorId\":\"2\",\"dateSent\":\"2000\",\"standardMessage\":{\"text\":{\"body\":\"second\"}}}}"
+            ]
+        summary <- convert (Options inPath out (Just tmp) False False)
+        sumConversations summary `shouldBe` 2
+        doesFileExist (out </> "Unknown.md") `shouldReturn` False
+        a <- TE.decodeUtf8 <$> BS.readFile (out </> "Unknown (10).md")
+        b <- TE.decodeUtf8 <$> BS.readFile (out </> "Unknown (20).md")
+        a `shouldSatisfy` T.isInfixOf "first"
+        b `shouldSatisfy` T.isInfixOf "second"
