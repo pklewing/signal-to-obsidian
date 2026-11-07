@@ -40,6 +40,8 @@ This is the one rule that really matters for this project:
 
 ## Pull requests
 
+`main` is protected: all changes, including the maintainer's, go through a pull request from a feature branch, and the `test` CI check must pass before merging.
+
 - Keep changes focused; a short description of what and why is plenty.
 - Make sure `cabal test` passes locally before opening the PR.
 - Update the README if you change behavior or flags.
