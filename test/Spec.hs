@@ -230,8 +230,9 @@ main = hspec $ do
         `shouldBe` Map.fromList [("1", "Straße.md"), ("2", "Strasse.md")]
     it "suffixed long names stay under the 255-byte filename limit" $ do
       let long = T.replicate 300 "\x00e9" -- 2 bytes each in UTF-8
-          names = Map.elems (assignFilenames [("123456", long), ("123457", long)])
-      length names `shouldBe` 2
+          longId c = T.replicate 60 "9" <> c -- ids are capped in the suffix
+          names = Map.elems (assignFilenames [("123456", long), ("123457", long), (longId "1", long), (longId "2", long)])
+      length names `shouldBe` 4
       names `shouldSatisfy` all (\n -> BS.length (TE.encodeUtf8 (T.pack n)) <= 255)
       names `shouldSatisfy` (\ns -> ns == List.nub ns)
     it "result does not depend on input order" $
@@ -543,3 +544,28 @@ main = hspec $ do
         sumPruned s3 `shouldBe` 1
         files <- listDirectory out
         files `shouldSatisfy` notElem "Alex.md"
+    it "never deletes a stale note the user has edited" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        appendFile (out </> "Alex.md") "\nmy annotation\n"
+        s2 <- run tmp out True (chat "Alex" "10" "1" <> chat "Alex" "31" "2")
+        sumPruned s2 `shouldBe` 0
+        doesFileExist (out </> "Alex.md") `shouldReturn` True
+    it "never deletes a user note that reuses a stale note's name" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+            two = chat "Alex" "10" "1" <> chat "Alex" "31" "2"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        _ <- run tmp out False two -- Alex.md now stale, still tracked
+        writeFile (out </> "Alex.md") "my own note"
+        s3 <- run tmp out True two
+        sumPruned s3 `shouldBe` 0
+        readFile (out </> "Alex.md") `shouldReturn` "my own note"
+    it "refuses to prune when the run wrote no notes" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        s2 <- run tmp out True ["{\"version\":1}"]
+        sumPruned s2 `shouldBe` 0
+        doesFileExist (out </> "Alex.md") `shouldReturn` True

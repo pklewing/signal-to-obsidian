@@ -65,6 +65,7 @@ module SignalToObsidian
   , convert
   ) where
 
+import Control.Exception (IOException, try)
 import Control.Monad (forM, forM_, unless, when)
 import Crypto.Hash (Digest, SHA256, hash)
 import qualified Data.Aeson as A
@@ -482,8 +483,15 @@ assignFilenames chats = go Set.empty
     base = Map.fromList [(cid, sanitizeFilename name) | (cid, name) <- chats]
     nameFor suffixed cid b
       -- suffix appended after sanitizing, so the length cap can't cut it off
-      | cid `Set.member` suffixed = b <> " (" <> T.filter (not . unsafeFilenameChar) cid <> ")"
+      | cid `Set.member` suffixed = b <> " (" <> idTag cid <> ")"
       | otherwise = b
+    -- Signal chat ids are short numbers; anything over 40 chars is shortened
+    -- to a prefix plus a hash of the full id, which stays bounded and unique.
+    idTag cid =
+      let clean = T.filter (not . unsafeFilenameChar) cid
+       in if T.length clean <= 40 && clean == cid
+            then cid
+            else T.take 31 clean <> "-" <> T.take 8 (sha256Hex (TE.encodeUtf8 cid))
     go suffixed =
       let named = Map.mapWithKey (nameFor suffixed) base
           groups = Map.fromListWith (<>) [(T.toLower n, [cid]) | (cid, n) <- Map.toList named]
@@ -593,10 +601,12 @@ renderChatItem idx fileIndex ci = case ciStandardMessage ci of
 -- ---------------------------------------------------------------------------
 -- Stale-note pruning
 --
--- Every run records the notes it generated in a hidden manifest in the output
--- dir. With --prune, notes listed by an earlier run but not written by this
--- one (e.g. renamed by collision suffixing) are deleted. Only manifest entries
--- are ever deleted, so the user's own notes in a shared vault are safe.
+-- Every run records the notes it generated, with a SHA-256 of their content,
+-- in a hidden manifest in the output dir. With --prune, notes listed by an
+-- earlier run but not written by this one (e.g. renamed by collision
+-- suffixing) are deleted -- but only if the file still has exactly the
+-- content the tool wrote. Anything else (the user's own notes, or generated
+-- notes the user has edited) is never deleted.
 -- ---------------------------------------------------------------------------
 
 -- | Hidden (dotfile, so Obsidian ignores it) list of generated notes.
@@ -619,14 +629,56 @@ staleNotes previous written = List.nub (filter deletable previous)
         && length f > length (".md" :: String)
         && not (T.toLower (T.pack f) `Set.member` writtenFolded)
 
-readManifest :: FilePath -> IO [FilePath]
+-- | Manifest lines are @\<sha256 hex\>\\t\<note filename\>@; malformed lines are ignored.
+readManifest :: FilePath -> IO [(FilePath, Text)]
 readManifest path = do
   exists <- doesFileExist path
   if not exists
     then pure []
     else do
       raw <- BS.readFile path
-      pure [T.unpack l | l <- T.lines (TE.decodeUtf8With lenientDecode raw), not (T.null l)]
+      pure
+        [ (T.unpack (T.drop 1 name), h)
+        | l <- T.lines (TE.decodeUtf8With lenientDecode raw)
+        , let (h, name) = T.breakOn "\t" l
+        , T.length h == 64
+        , T.length name > 1
+        ]
+
+writeManifest :: FilePath -> [(FilePath, Text)] -> IO ()
+writeManifest path entries =
+  BS.writeFile path . TE.encodeUtf8 . T.unlines $
+    [h <> "\t" <> T.pack f | (f, h) <- List.sortOn fst entries]
+
+data PruneOutcome = Pruned | Tracked (FilePath, Text) | Forgotten
+
+-- | Decide the fate of one stale manifest entry; deletes it only when
+-- pruning and the file is byte-identical to what the tool wrote.
+pruneEntry :: Bool -> Bool -> FilePath -> (FilePath, Text) -> IO PruneOutcome
+pruneEntry doPrune verbose outDir entry@(f, h) = do
+  let path = outDir </> f
+  exists <- doesFileExist path
+  if not exists
+    then pure Forgotten -- already gone
+    else do
+      current <- sha256Hex <$> BS.readFile path
+      if current /= h
+        then do
+          -- edited or replaced by the user: no longer ours, never delete
+          when (doPrune && verbose) $ printf "Kept %s (modified since generated; no longer tracked)\n" f
+          pure Forgotten
+        else
+          if not doPrune
+            then pure (Tracked entry) -- remember it so a later --prune can remove it
+            else do
+              r <- try (removeFile path)
+              case r of
+                Right () -> do
+                  when verbose $ printf "Pruned stale %s\n" f
+                  pure Pruned
+                Left (e :: IOException) -> do
+                  printf "Warning: could not prune %s: %s\n" f (show e)
+                  pure (Tracked entry)
 
 -- ---------------------------------------------------------------------------
 -- CLI / conversion
@@ -712,6 +764,7 @@ convert opts = do
           Nothing -> "chat-" <> chatId
       -- resolve all filenames up front so same-named chats can't overwrite each other
       fileNames = assignFilenames [(c, convNameFor c) | c <- Map.keys itemsByChat]
+      foldedNames = map (T.toLower . T.pack) (Map.elems fileNames)
       allAttachments =
         [ att
         | items <- Map.elems itemsByChat
@@ -721,44 +774,51 @@ convert opts = do
       hashes = map attachmentHash allAttachments
       noLocator = length (filter isNothing hashes)
       missing = length [() | Just h <- hashes, not (Map.member h fileIndex)]
-  forM_ (Map.toList (Map.intersectionWith (,) fileNames itemsByChat)) $ \(chatId, (fname, itemsNewestFirst)) -> do
+  -- assignFilenames should make this impossible; never silently overwrite
+  when (length (List.nub foldedNames) /= length foldedNames) $
+    ioError (userError "internal error: could not assign unique note filenames")
+  written <- forM (Map.toList (Map.intersectionWith (,) fileNames itemsByChat)) $ \(chatId, (fname, itemsNewestFirst)) -> do
     let convName = convNameFor chatId
         n = length itemsNewestFirst
         header = "# " <> convName <> "\n\n_" <> T.pack (show n) <> " messages_\n"
     blocks <- catMaybes <$> mapM (renderChatItem idx fileIndex) itemsNewestFirst
-    forM_ itemsNewestFirst $ \ci ->
-      forM_ (maybe [] smAttachments (ciStandardMessage ci)) $ \att ->
-        case resolveOnDisk fileIndex att of
-          Nothing -> pure () -- counted above
-          Just src -> when (optCopyMedia opts) $ do
+    when (optCopyMedia opts) $
+      forM_ itemsNewestFirst $ \ci ->
+        forM_ (maybe [] smAttachments (ciStandardMessage ci)) $ \att ->
+          forM_ (resolveOnDisk fileIndex att) $ \src -> do
             let h = fromMaybe "" (attachmentHash att)
                 dst = outDir </> "files" </> T.unpack (T.take 2 h) </> takeFileName src
             createDirectoryIfMissing True (takeDirectory dst)
             dstExists <- doesPathExist dst
             unless dstExists $ copyFile src dst
     let content = header <> "\n" <> T.intercalate "\n\n---\n\n" blocks <> "\n"
-    BS.writeFile (outDir </> fname) (TE.encodeUtf8 content)
+        bytes = TE.encodeUtf8 content
+    BS.writeFile (outDir </> fname) bytes
     when (optVerbose opts) $ printf "Wrote %s  (%d messages)\n" fname n
-  -- Prune stale notes, then record what's ours. Without --prune the old
-  -- entries are kept so a later --prune run can still clean them up.
+    pure (fname, sha256Hex bytes)
+  -- Prune stale notes, then record what's ours.
   let manifestPath = outDir </> manifestFileName
-      written = Map.elems fileNames
+      writtenNames = map fst written
+      writtenFolded = Set.fromList (map (T.toLower . T.pack) writtenNames)
+      -- a run that wrote nothing is almost certainly a wrong/empty export
+      doPrune = optPrune opts && not (null written)
+  when (optPrune opts && null written && optVerbose opts) $
+    printf "Not pruning: this run wrote no notes (empty or wrong export?).\n"
   previous <- readManifest manifestPath
-  let stale = staleNotes previous written
-  pruned <-
-    if optPrune opts
-      then fmap (length . catMaybes) . forM stale $ \f -> do
-        let path = outDir </> f
-        exists <- doesFileExist path
-        if exists
-          then do
-            removeFile path
-            when (optVerbose opts) $ printf "Pruned stale %s\n" f
-            pure (Just ())
-          else pure Nothing
-      else pure 0
-  let keep = if optPrune opts then written else List.nub (written <> stale)
-  BS.writeFile manifestPath (TE.encodeUtf8 (T.unlines (map T.pack (List.sort keep))))
+  let staleSet = Set.fromList (staleNotes (map fst previous) writtenNames)
+      stale = [e | e@(f, _) <- previous, f `Set.member` staleSet]
+      -- case-only variants of a written note: same file on macOS/Windows, so
+      -- never deleted, but kept tracked rather than orphaned on Linux
+      caseVariants =
+        [ e
+        | e@(f, _) <- previous
+        , f `notElem` writtenNames
+        , T.toLower (T.pack f) `Set.member` writtenFolded
+        ]
+  outcomes <- mapM (pruneEntry doPrune (optVerbose opts) outDir) stale
+  let pruned = length [() | Pruned <- outcomes]
+      tracked = [e | Tracked e <- outcomes]
+  writeManifest manifestPath (written <> tracked <> caseVariants)
   when (optVerbose opts) $ do
     printf "\nDone. %d conversation file(s) in %s\n" (Map.size itemsByChat) outDir
     when (missing > 0) $
