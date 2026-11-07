@@ -7,6 +7,7 @@ module Main (main) where
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
+import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust, isNothing)
 import Data.Text (Text)
@@ -194,6 +195,11 @@ main = hspec $ do
       sanitizeFilename ". . spaced" `shouldBe` "spaced"
     it "trailing dots and spaces stripped (Windows rejects them)" $
       sanitizeFilename "Trip..." `shouldBe` "Trip"
+    it "control characters stripped" $
+      sanitizeFilename "a\x01\&b\x00\&c" `shouldBe` "abc"
+    it "capped at 200 UTF-8 bytes without splitting characters" $ do
+      T.length (sanitizeFilename (T.replicate 300 "x")) `shouldBe` 200
+      sanitizeFilename (T.replicate 150 "\x00e9") `shouldBe` T.replicate 100 "\x00e9"
     it "inner dots kept" $
       sanitizeFilename "v1.2 notes" `shouldBe` "v1.2 notes"
     it "empty / all-illegal falls back to a default" $ do
@@ -219,6 +225,15 @@ main = hspec $ do
       assignFilenames [("5", "Unknown"), ("6", "Unknown"), ("7", "Unknown (5)")]
         `shouldBe` Map.fromList
           [("5", "Unknown (5).md"), ("6", "Unknown (6).md"), ("7", "Unknown (5) (7).md")]
+    it "folds case like filesystems do: ß and ss stay distinct" $
+      assignFilenames [("1", "Straße"), ("2", "Strasse")]
+        `shouldBe` Map.fromList [("1", "Straße.md"), ("2", "Strasse.md")]
+    it "suffixed long names stay under the 255-byte filename limit" $ do
+      let long = T.replicate 300 "\x00e9" -- 2 bytes each in UTF-8
+          names = Map.elems (assignFilenames [("123456", long), ("123457", long)])
+      length names `shouldBe` 2
+      names `shouldSatisfy` all (\n -> BS.length (TE.encodeUtf8 (T.pack n)) <= 255)
+      names `shouldSatisfy` (\ns -> ns == List.nub ns)
     it "result does not depend on input order" $
       assignFilenames [("9", "X"), ("1", "x")] `shouldBe` assignFilenames [("1", "x"), ("9", "X")]
 

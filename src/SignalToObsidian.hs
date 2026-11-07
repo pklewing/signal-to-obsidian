@@ -68,7 +68,7 @@ import Data.Aeson (FromJSON (..), withObject, (.!=), (.:?))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as BC
-import Data.Char (isSpace)
+import Data.Char (isControl, isSpace)
 import Data.List (isPrefixOf, sortOn)
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
@@ -422,24 +422,48 @@ recipientDisplayName r selfName
 -- Filesystem-safe filenames
 -- ---------------------------------------------------------------------------
 
+-- | Characters removed from note names: control characters, those illegal on
+-- common filesystems, and those Obsidian can't link to (@#@ heading, @^@ block
+-- ref, @[@ @]@ wikilink, @|@ alias).
+unsafeFilenameChar :: Char -> Bool
+unsafeFilenameChar c = isControl c || c `elem` ("\\/:*?\"<>|#^[]" :: String)
+
+-- | Longest sanitized name, in UTF-8 bytes. Leaves room under the common
+-- 255-byte filename limit for a collision suffix and the @.md@ extension.
+maxNameBytes :: Int
+maxNameBytes = 200
+
 -- | Make a display name safe as both a filename and an Obsidian note name.
 --
--- Strips characters illegal on common filesystems plus those Obsidian can't
--- link to (@#@ heading, @^@ block ref, @[@ @]@ wikilink, @|@ alias), collapses
--- whitespace, drops leading dots (they hide the note in Obsidian) and
--- trailing dots/spaces (rejected by Windows). Falls back to @"conversation"@.
+-- Strips 'unsafeFilenameChar's, collapses whitespace, drops leading dots (they
+-- hide the note in Obsidian) and trailing dots/spaces (rejected by Windows),
+-- and caps the length at 'maxNameBytes'. Falls back to @"conversation"@.
 sanitizeFilename :: Text -> Text
 sanitizeFilename s =
-  let legal = T.filter (`notElem` ("\\/:*?\"<>|#^[]" :: String)) s
+  let legal = T.filter (not . unsafeFilenameChar) s
       collapsed = T.unwords (T.words legal) -- collapse whitespace + trim
-      trimmed = T.dropWhileEnd (\c -> c == '.' || isSpace c) (T.dropWhile (\c -> c == '.' || isSpace c) collapsed)
-   in if T.null trimmed then "conversation" else trimmed
+      dotOrSpace c = c == '.' || isSpace c
+      trimmed = T.dropWhileEnd dotOrSpace (T.dropWhile dotOrSpace collapsed)
+      capped = T.dropWhileEnd dotOrSpace (takeUtf8Bytes maxNameBytes trimmed)
+   in if T.null capped then "conversation" else capped
+
+-- | Longest prefix whose UTF-8 encoding fits in @n@ bytes (never splits a char).
+takeUtf8Bytes :: Int -> Text -> Text
+takeUtf8Bytes n t
+  | BS.length (TE.encodeUtf8 t) <= n = t
+  | otherwise = T.pack (go 0 (T.unpack t))
+  where
+    go _ [] = []
+    go acc (c : cs) =
+      let w = BS.length (TE.encodeUtf8 (T.singleton c))
+       in if acc + w > n then [] else c : go (acc + w) cs
 
 -- | Assign every chat a unique output filename (with @.md@), keyed by chat id.
 --
 -- Input is @(chatId, displayName)@. Names are compared case-insensitively
--- (after sanitizing) because macOS and Windows filesystems are
--- case-insensitive by default. A name used by exactly one chat is kept as-is;
+-- (after sanitizing, via 'T.toLower': simple per-character folding as
+-- filesystems do, so e.g. @ß@ and @ss@ stay distinct) because macOS and
+-- Windows filesystems are case-insensitive by default. A name used by exactly one chat is kept as-is;
 -- when several chats share a name, /every/ one of them gets a
 -- @" (\<chatId\>)"@ suffix, so the result does not depend on input order.
 -- Suffixing repeats until no clashes remain, which also covers a chat whose
@@ -451,11 +475,12 @@ assignFilenames chats = go Set.empty
   where
     base = Map.fromList [(cid, sanitizeFilename name) | (cid, name) <- chats]
     nameFor suffixed cid b
-      | cid `Set.member` suffixed = sanitizeFilename (b <> " (" <> cid <> ")")
+      -- suffix appended after sanitizing, so the length cap can't cut it off
+      | cid `Set.member` suffixed = b <> " (" <> T.filter (not . unsafeFilenameChar) cid <> ")"
       | otherwise = b
     go suffixed =
       let named = Map.mapWithKey (nameFor suffixed) base
-          groups = Map.fromListWith (<>) [(T.toCaseFold n, [cid]) | (cid, n) <- Map.toList named]
+          groups = Map.fromListWith (<>) [(T.toLower n, [cid]) | (cid, n) <- Map.toList named]
           clashing = Set.fromList (concat (filter ((> 1) . length) (Map.elems groups)))
           new = clashing `Set.difference` suffixed
        in if Set.null new
@@ -590,13 +615,13 @@ data Options = Options
   deriving (Show)
 
 data Summary = Summary
-  { sumConversations :: Int
-  , sumMissing :: Int
+  { sumConversations :: !Int
+  , sumMissing :: !Int
   -- ^ attachments with a derivable hash but no file in the index
   -- (rendered as an "attachment unavailable" placeholder)
-  , sumNoLocator :: Int
+  , sumNoLocator :: !Int
   -- ^ attachments without locator info, so no derivable hash (not rendered)
-  , sumIndexed :: Int
+  , sumIndexed :: !Int
   }
   deriving (Show, Eq)
 
@@ -646,9 +671,8 @@ convert opts = do
       hashes = map attachmentHash allAttachments
       noLocator = length (filter isNothing hashes)
       missing = length [() | Just h <- hashes, not (Map.member h fileIndex)]
-  forM_ (Map.toList itemsByChat) $ \(chatId, itemsNewestFirst) -> do
+  forM_ (Map.toList (Map.intersectionWith (,) fileNames itemsByChat)) $ \(chatId, (fname, itemsNewestFirst)) -> do
     let convName = convNameFor chatId
-        fname = Map.findWithDefault (T.unpack (sanitizeFilename convName) <> ".md") chatId fileNames
         n = length itemsNewestFirst
         header = "# " <> convName <> "\n\n_" <> T.pack (show n) <> " messages_\n"
     blocks <- catMaybes <$> mapM (renderChatItem idx fileIndex) itemsNewestFirst
