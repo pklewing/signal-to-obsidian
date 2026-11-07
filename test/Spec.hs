@@ -315,6 +315,48 @@ main = hspec $ do
     it "empty reactions -> Nothing" $
       renderReactions idx [] `shouldBe` Nothing
 
+  describe "escapeBody" $ do
+    it "escapes headings, fences and HTML at line start" $ do
+      escapeBody "# not a heading" `shouldBe` "\\# not a heading"
+      escapeBody "#tag" `shouldBe` "\\#tag"
+      escapeBody "```" `shouldBe` "\\`\\`\\`"
+      escapeBody "<!-- hidden?" `shouldBe` "\\<\\!\\-\\- hidden?"
+    it "escapes the whole leading run, so ~~~ leaves no ~~ strikethrough" $
+      escapeBody "~~~ code" `shouldBe` "\\~\\~\\~ code"
+    it "escapes rule-like lines (thematic breaks, setext underlines)" $ do
+      escapeBody "---" `shouldBe` "\\-\\-\\-"
+      escapeBody "text\n===" `shouldBe` "text\n\\=\\=\\="
+      escapeBody "text\n-" `shouldBe` "text\n\\-"
+      escapeBody "- - -" `shouldBe` "\\- - -" -- escaped first char already stops the rule
+    it "escapes list, quote, table and link-definition markers" $ do
+      escapeBody "- milk" `shouldBe` "\\- milk"
+      escapeBody "> quoted" `shouldBe` "\\> quoted"
+      escapeBody "| a | b |" `shouldBe` "\\| a | b |"
+      escapeBody "[1]: https://example.com" `shouldBe` "\\[1]: https://example.com"
+      escapeBody "[^1]: note" `shouldBe` "\\[\\^1]: note"
+    it "escapes Obsidian %% comments and $$ math anywhere in a line" $ do
+      escapeBody "%% just kidding" `shouldBe` "\\%\\% just kidding"
+      escapeBody "50%% off" `shouldBe` "50\\%\\% off"
+      escapeBody "costs $$" `shouldBe` "costs \\$\\$"
+    it "treats CRLF and lone CR as line breaks" $ do
+      escapeBody "Title\r\n---" `shouldBe` "Title\n\\-\\-\\-"
+      escapeBody "hi\r# heading" `shouldBe` "hi\n\\# heading"
+    it "escapes each line independently, keeping up to 3 spaces of indent" $
+      escapeBody "fine\n  ## two\nalso fine" `shouldBe` "fine\n  \\#\\# two\nalso fine"
+    it "leaves ordinary text and mid-line syntax alone" $ do
+      escapeBody "Hello world" `shouldBe` "Hello world"
+      escapeBody "issue #12 and a<b, *nice*" `shouldBe` "issue #12 and a<b, *nice*"
+      escapeBody "1. first" `shouldBe` "1. first"
+      escapeBody "" `shouldBe` ""
+    it "4+ spaces of indent is code, not a block start: left alone" $
+      escapeBody "    # x" `shouldBe` "    # x"
+
+  describe "messageCountLine" $ do
+    it "singular and plural" $ do
+      messageCountLine 1 `shouldBe` "_1 message_"
+      messageCountLine 0 `shouldBe` "_0 messages_"
+      messageCountLine 2 `shouldBe` "_2 messages_"
+
   -- -------------------------------------------------------------------------
   -- 8. End-to-end rendering of a chat item
   -- -------------------------------------------------------------------------
@@ -369,6 +411,13 @@ main = hspec $ do
       out `shouldSatisfy` infixOfM "attachment unavailable"
       out `shouldSatisfy` infixOfM "image/jpeg"
       out `shouldSatisfy` (not . infixOfM "![[")
+
+    it "body Markdown block syntax is escaped" $ do
+      let idx = Index Map.empty Map.empty Nothing "Me"
+      out <-
+        renderChatItem idx Map.empty $
+          dec "{\"chatId\":\"1\",\"authorId\":\"5\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"# big\\n---\\nok\"}}}"
+      out `shouldSatisfy` infixOfM "\\# big\n\\-\\-\\-\nok"
 
     it "a chatItem without standardMessage renders nothing" $ do
       let idx = Index Map.empty Map.empty Nothing "Me"
@@ -569,3 +618,40 @@ main = hspec $ do
         s2 <- run tmp out True ["{\"version\":1}"]
         sumPruned s2 `shouldBe` 0
         doesFileExist (out </> "Alex.md") `shouldReturn` True
+
+
+  describe "integration (message count)" $ do
+    it "header counts rendered messages only, with correct grammar" $
+      withSystemTempDirectory "sig-count-" $ \tmp -> do
+        let inPath = tmp </> "export.jsonl"
+            out = tmp </> "out"
+        BL.writeFile inPath $
+          BL.unlines
+            [ "{\"recipient\":{\"id\":\"1\",\"contact\":{\"profileGivenName\":\"Alex\"}}}"
+            , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"hi\"}}}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"2000\",\"updateMessage\":{\"groupChange\":{}}}}"
+            ]
+        _ <- convert (Options inPath out (Just tmp) False False False)
+        note <- TE.decodeUtf8 <$> BS.readFile (out </> "Alex.md")
+        note `shouldSatisfy` T.isInfixOf "_1 message_"
+        note `shouldSatisfy` (not . T.isInfixOf "_2 messages_")
+
+    it "chats with nothing renderable get no note" $
+      withSystemTempDirectory "sig-count-" $ \tmp -> do
+        let inPath = tmp </> "export.jsonl"
+            out = tmp </> "out"
+        BL.writeFile inPath $
+          BL.unlines
+            [ "{\"recipient\":{\"id\":\"1\",\"contact\":{\"profileGivenName\":\"Alex\"}}}"
+            , "{\"recipient\":{\"id\":\"2\",\"contact\":{\"profileGivenName\":\"Alex\"}}}"
+            , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
+            , "{\"chat\":{\"id\":\"20\",\"recipientId\":\"2\"}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"hi\"}}}}"
+            , "{\"chatItem\":{\"chatId\":\"20\",\"authorId\":\"2\",\"dateSent\":\"2000\",\"updateMessage\":{\"groupChange\":{}}}}"
+            ]
+        summary <- convert (Options inPath out (Just tmp) False False False)
+        sumConversations summary `shouldBe` 1
+        -- the empty chat neither gets a note nor forces a suffix on the real one
+        doesFileExist (out </> "Alex.md") `shouldReturn` True
+        doesFileExist (out </> "Alex (20).md") `shouldReturn` False
