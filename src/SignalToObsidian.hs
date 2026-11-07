@@ -75,7 +75,7 @@ import Data.Aeson (FromJSON (..), withObject, (.!=), (.:?))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as BC
-import Data.Char (isControl, isSpace)
+import Data.Char (isAscii, isControl, isPunctuation, isSpace, isSymbol)
 import Data.List (isPrefixOf, sortOn)
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
@@ -549,36 +549,43 @@ buildIndexes records =
 -- Rendering
 -- ---------------------------------------------------------------------------
 
--- | Escape Markdown block syntax at the start of each line of a message body,
--- so the text renders literally and can't break the note's structure.
+-- | Make a plain-text message body render literally in Obsidian.
 --
--- Signal bodies are plain text, but a line that starts (after at most three
--- spaces) with any of these would otherwise be parsed as Markdown:
+-- Signal bodies are plain text, but Markdown gives meaning to punctuation at
+-- the start of a line: headings (@#@), code fences (@```@, @~~~@ -- unclosed,
+-- they swallow the rest of the note), HTML blocks (an unclosed @<!--@ hides
+-- the rest), rules and setext underlines (@---@ looks like our message
+-- separator), lists, quotes, tables, link/footnote definitions (@[1]: url@
+-- vanishes), and more. Rather than chase each construct, every line's leading
+-- run of ASCII punctuation (after at most 3 spaces; 4+ is an indented code
+-- block, which is closed and harmless) is backslash-escaped -- CommonMark
+-- allows escaping any ASCII punctuation. Obsidian's @%%@ comments and @$$@
+-- math, which also work mid-line, are escaped wherever they appear.
 --
--- * @#@          a heading (or an Obsidian tag)
--- * @```@ / @~~~@  a code fence; unclosed, it swallows the rest of the note
--- * @<@          an HTML block; an unclosed @<!--@ hides the rest of the note
--- * only @-@ @*@ @_@ @=@ and spaces: a thematic break, which looks just like
---   the @---@ separator between messages, or a setext underline that turns
---   the previous line into a heading
---
--- Each such line gets a backslash before its first non-space character.
--- Everything else (inline formatting, lists, quotes) is left alone.
+-- Line endings are normalised to @\\n@ first: Markdown also breaks lines at
+-- @\\r\\n@ and a lone @\\r@.
 escapeBody :: Text -> Text
-escapeBody = T.intercalate "\n" . map escapeLine . T.splitOn "\n"
+escapeBody =
+  T.intercalate "\n" . map (escapeObsidian . escapeLineStart) . T.splitOn "\n" . normaliseNewlines
   where
-    escapeLine l =
+    normaliseNewlines = T.replace "\r" "\n" . T.replace "\r\n" "\n"
+    isAsciiPunct c = isAscii c && (isPunctuation c || isSymbol c)
+    escapeLineStart l =
       let (indent, rest) = T.span (== ' ') l
-          startsBlock = any (`T.isPrefixOf` rest) ["#", "```", "~~~", "<"]
-          ruleLike = not (T.null (T.strip rest)) && T.all (`elem` ("-*_= \t" :: String)) rest
-       in if T.length indent <= 3 && (startsBlock || ruleLike)
-            then indent <> "\\" <> rest
+          (punct, after) = T.span isAsciiPunct rest
+       in if T.length indent <= 3 && not (T.null punct)
+            then indent <> T.concatMap (\c -> T.pack ['\\', c]) punct <> after
             else l
+    escapeObsidian = T.replace "$$" "\\$\\$" . T.replace "%%" "\\%\\%"
+
+-- | "1 message" / "N messages".
+pluralMessages :: Int -> Text
+pluralMessages 1 = "1 message"
+pluralMessages n = T.pack (show n) <> " messages"
 
 -- | The italic count line under a conversation's heading.
 messageCountLine :: Int -> Text
-messageCountLine 1 = "_1 message_"
-messageCountLine n = "_" <> T.pack (show n) <> " messages_"
+messageCountLine n = "_" <> pluralMessages n <> "_"
 
 resolveAuthorName :: Index -> Maybe Text -> Text
 resolveAuthorName idx authorId
@@ -796,8 +803,6 @@ convert opts = do
           Just r -> recipientDisplayName r (idxSelfName idx)
           Nothing -> "chat-" <> chatId
       -- resolve all filenames up front so same-named chats can't overwrite each other
-      fileNames = assignFilenames [(c, convNameFor c) | c <- Map.keys itemsByChat]
-      foldedNames = map (T.toLower . T.pack) (Map.elems fileNames)
       allAttachments =
         [ att
         | items <- Map.elems itemsByChat
@@ -807,11 +812,17 @@ convert opts = do
       hashes = map attachmentHash allAttachments
       noLocator = length (filter isNothing hashes)
       missing = length [() | Just h <- hashes, not (Map.member h fileIndex)]
+  -- Render first: chats with nothing renderable (e.g. only calls or group
+  -- updates) get no note, and so can't force suffixes onto real conversations.
+  rendered <- traverse (fmap catMaybes . mapM (renderChatItem idx fileIndex)) itemsByChat
+  let nonEmpty = Map.filter (not . null) rendered
+      fileNames = assignFilenames [(c, convNameFor c) | c <- Map.keys nonEmpty]
+      foldedNames = map (T.toLower . T.pack) (Map.elems fileNames)
+      toWrite = Map.intersectionWith (,) fileNames (Map.intersectionWith (,) nonEmpty itemsByChat)
   -- assignFilenames should make this impossible; never silently overwrite
   when (length (List.nub foldedNames) /= length foldedNames) $
     ioError (userError "internal error: could not assign unique note filenames")
-  written <- forM (Map.toList (Map.intersectionWith (,) fileNames itemsByChat)) $ \(chatId, (fname, itemsNewestFirst)) -> do
-    blocks <- catMaybes <$> mapM (renderChatItem idx fileIndex) itemsNewestFirst
+  written <- forM (Map.toList toWrite) $ \(chatId, (fname, (blocks, itemsNewestFirst))) -> do
     -- count what's rendered, not raw chat items (skipped types aren't shown)
     let convName = convNameFor chatId
         n = length blocks
@@ -828,7 +839,7 @@ convert opts = do
     let content = header <> "\n" <> T.intercalate "\n\n---\n\n" blocks <> "\n"
         bytes = TE.encodeUtf8 content
     BS.writeFile (outDir </> fname) bytes
-    when (optVerbose opts) $ printf "Wrote %s  (%d messages)\n" fname n
+    when (optVerbose opts) $ printf "Wrote %s  (%s)\n" fname (pluralMessages n)
     pure (fname, sha256Hex bytes)
   -- Prune stale notes, then record what's ours.
   let manifestPath = outDir </> manifestFileName
@@ -854,7 +865,7 @@ convert opts = do
       tracked = [e | Tracked e <- outcomes]
   writeManifest manifestPath (written <> tracked <> caseVariants)
   when (optVerbose opts) $ do
-    printf "\nDone. %d conversation file(s) in %s\n" (Map.size itemsByChat) outDir
+    printf "\nDone. %d conversation file(s) in %s\n" (length written) outDir
     when (missing > 0) $
       printf
         "Note: %d attachment(s) were not found under %s/files/ and are shown as \"attachment unavailable\" placeholders.\n"
@@ -864,7 +875,7 @@ convert opts = do
       printf "Note: %d attachment(s) had no locator info and were skipped.\n" noLocator
   pure
     Summary
-      { sumConversations = Map.size itemsByChat
+      { sumConversations = length written
       , sumMissing = missing
       , sumNoLocator = noLocator
       , sumIndexed = Map.size fileIndex
