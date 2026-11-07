@@ -27,7 +27,9 @@ CI (`.github/workflows/test.yml`) runs on `ubuntu-latest` with GHC 9.10 and the 
 `main` is protected by a GitHub ruleset: no direct pushes, no force-pushes, no deletion. Every change lands via pull request, and the `test` CI check must pass first.
 
 - Never commit on `main`. Branch first: `git switch -c <type>/<short-desc>` (e.g. `feat/…`, `fix/…`, `chore/…`, `docs/…`).
-- Push the branch and open a PR with `gh pr create`; merge with `gh pr merge` once CI is green. Merged branches are deleted automatically.
+- Push the branch and open a PR with `gh pr create`.
+- Review: the project has a single maintainer, so required approvals are 0 (GitHub doesn't allow self-approval). Instead, every PR gets a Claude review (`/code-review <PR#>`) plus the maintainer's own read-through before merging. Fix or explicitly dismiss findings first.
+- Merge with `gh pr merge --squash` once CI is green and the review is done — one commit per PR on `main`. Merged branches are deleted automatically.
 - Treat PRs that modify `CLAUDE.md` with extra care — this file steers Claude Code's behavior on every checkout of the repo.
 
 ## Development machines
