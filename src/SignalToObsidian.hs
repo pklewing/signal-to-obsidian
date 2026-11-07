@@ -47,6 +47,7 @@ module SignalToObsidian
     -- * Index building
   , Index (..)
   , buildIndexes
+  , readExport
 
     -- * Rendering
   , escapeBody
@@ -54,6 +55,8 @@ module SignalToObsidian
   , renderReactions
   , renderAttachments
   , renderChatItem
+  , isRenderable
+  , chatKey
 
     -- * Stale-note pruning
   , manifestFileName
@@ -102,6 +105,7 @@ import System.Directory
   , removeFile
   )
 import System.FilePath (dropExtension, takeDirectory, takeFileName, (</>))
+import System.IO (IOMode (ReadMode), hIsEOF, withBinaryFile)
 import Text.Printf (printf)
 
 -- ---------------------------------------------------------------------------
@@ -507,18 +511,24 @@ assignFilenames chats = go Set.empty
 -- First pass: build lookup tables
 -- ---------------------------------------------------------------------------
 
+-- Fields are strict so an index built record by record (see 'readExport')
+-- doesn't accumulate a chain of unevaluated updates.
 data Index = Index
-  { idxRecipients :: Map Text Recipient -- id -> recipient
-  , idxChats :: Map Text Text -- chatId -> recipientId
-  , idxSelfId :: Maybe Text
-  , idxSelfName :: Text
+  { idxRecipients :: !(Map Text Recipient) -- id -> recipient
+  , idxChats :: !(Map Text Text) -- chatId -> recipientId
+  , idxSelfId :: !(Maybe Text)
+  , idxSelfName :: !Text
   }
   deriving (Show)
 
-buildIndexes :: [Record] -> Index
-buildIndexes records =
+emptyIndex :: Index
+emptyIndex = Index Map.empty Map.empty Nothing "Me"
+
+-- | Fold one record into the lookup tables.
+indexStep :: Index -> Record -> Index
+indexStep idx rec =
   let idText = maybe "" unId
-      step idx rec = case (recRecipient rec, recChat rec, recAccount rec) of
+   in case (recRecipient rec, recChat rec, recAccount rec) of
         (Just r, _, _) ->
           idx
             { idxRecipients = Map.insert (idText (rcpId r)) r (idxRecipients idx)
@@ -533,8 +543,11 @@ buildIndexes records =
           let full = T.strip (fromMaybe "" (accGivenName a) <> " " <> fromMaybe "" (accFamilyName a))
            in if T.null full then idx else idx {idxSelfName = full}
         _ -> idx
-      base = List.foldl' step (Index Map.empty Map.empty Nothing "Me") records
-      -- If the account holder also appears as a recipient with a self marker
+
+-- | Final touches once every record has been seen.
+finaliseIndex :: Index -> Index
+finaliseIndex base =
+  let -- If the account holder also appears as a recipient with a self marker
       -- carrying a contact name, prefer that (it is usually the fuller
       -- profile/system name).
       selfContactName = do
@@ -544,6 +557,35 @@ buildIndexes records =
         let nm = contactName c
         if nm == "Unknown" then Nothing else Just nm
    in base {idxSelfName = fromMaybe (idxSelfName base) selfContactName}
+
+buildIndexes :: [Record] -> Index
+buildIndexes = finaliseIndex . List.foldl' indexStep emptyIndex
+
+-- | Read the export one line at a time, keeping only the lookup tables and
+-- the chat items that can be rendered (those with a @standardMessage@),
+-- grouped by chat id, newest first. Neither the raw file nor the full list of
+-- records is ever held in memory. Malformed lines fail with their line number.
+readExport :: FilePath -> IO (Index, Map Text [ChatItem])
+readExport path = withBinaryFile path ReadMode $ \h ->
+  let loop !lineNo !idx !items = do
+        eof <- hIsEOF h
+        if eof
+          then pure (finaliseIndex idx, items)
+          else do
+            line <- BC.hGetLine h
+            if BC.all isSpace line
+              then loop (lineNo + 1) idx items
+              else case A.eitherDecodeStrict line of
+                Left err ->
+                  ioError (userError (path <> ":" <> show (lineNo :: Int) <> ": " <> err))
+                Right rec ->
+                  let items' = case recChatItem rec of
+                        Just ci
+                          | isRenderable ci ->
+                              Map.insertWith (<>) (chatKey ci) [ci] items
+                        _ -> items
+                   in loop (lineNo + 1) (indexStep idx rec) items'
+   in loop 1 emptyIndex Map.empty
 
 -- ---------------------------------------------------------------------------
 -- Rendering
@@ -625,7 +667,18 @@ renderAttachments fileIndex attachments =
             -- no locator at all: nothing renderable
             _ -> Nothing
 
--- | Render one chatItem to a Markdown block, or Nothing if nothing to show.
+-- | Whether 'renderChatItem' produces a block for this item. 'readExport'
+-- keeps only these, which is why every chat it returns gets a non-empty
+-- note. Keep the two in sync when adding support for more item types.
+isRenderable :: ChatItem -> Bool
+isRenderable = isJust . ciStandardMessage
+
+-- | The chat an item belongs to (@""@ if the export omits it).
+chatKey :: ChatItem -> Text
+chatKey = maybe "" unId . ciChatId
+
+-- | Render one chatItem to a Markdown block; Nothing exactly when not
+-- 'isRenderable'.
 renderChatItem :: Index -> Map Text FilePath -> ChatItem -> IO (Maybe Text)
 renderChatItem idx fileIndex ci = case ciStandardMessage ci of
   Nothing -> pure Nothing
@@ -783,22 +836,9 @@ convert opts = do
   fileIndex <- buildFileIndex filesRoot
   when (optVerbose opts) $
     printf "Indexed %d media file(s) under %s/files/\n" (Map.size fileIndex) filesRoot
-  raw <- BS.readFile inPath
-  records <-
-    forM (filter (not . BC.all isSpace) (BC.lines raw)) $
-      either (ioError . userError) pure . A.eitherDecodeStrict
-  let idx = buildIndexes records
-      chatKey ci = maybe "" unId (ciChatId ci)
-      -- per chat, items end up newest-first (reverse of file order)
-      itemsByChat =
-        List.foldl'
-          ( \m rec -> case recChatItem rec of
-              Just ci -> Map.insertWith (<>) (chatKey ci) [ci] m
-              Nothing -> m
-          )
-          Map.empty
-          records
-      convNameFor chatId =
+  -- per chat, items are newest-first (reverse of file order)
+  (idx, itemsByChat) <- readExport inPath
+  let convNameFor chatId =
         case Map.lookup chatId (idxChats idx) >>= (`Map.lookup` idxRecipients idx) of
           Just r -> recipientDisplayName r (idxSelfName idx)
           Nothing -> "chat-" <> chatId
@@ -812,17 +852,19 @@ convert opts = do
       hashes = map attachmentHash allAttachments
       noLocator = length (filter isNothing hashes)
       missing = length [() | Just h <- hashes, not (Map.member h fileIndex)]
-  -- Render first: chats with nothing renderable (e.g. only calls or group
-  -- updates) get no note, and so can't force suffixes onto real conversations.
-  rendered <- traverse (fmap catMaybes . mapM (renderChatItem idx fileIndex)) itemsByChat
-  let nonEmpty = Map.filter (not . null) rendered
-      fileNames = assignFilenames [(c, convNameFor c) | c <- Map.keys nonEmpty]
+  -- readExport keeps only items with a standardMessage, and each of those
+  -- renders, so every chat here has something to show: chats with only
+  -- calls or group updates get no note and can't force suffixes onto real
+  -- conversations. Each chat is rendered just before it's written, so only
+  -- one note's text is in memory at a time.
+  let fileNames = assignFilenames [(c, convNameFor c) | c <- Map.keys itemsByChat]
       foldedNames = map (T.toLower . T.pack) (Map.elems fileNames)
-      toWrite = Map.intersectionWith (,) fileNames (Map.intersectionWith (,) nonEmpty itemsByChat)
+      toWrite = Map.intersectionWith (,) fileNames itemsByChat
   -- assignFilenames should make this impossible; never silently overwrite
   when (length (List.nub foldedNames) /= length foldedNames) $
     ioError (userError "internal error: could not assign unique note filenames")
-  written <- forM (Map.toList toWrite) $ \(chatId, (fname, (blocks, itemsNewestFirst))) -> do
+  written <- forM (Map.toList toWrite) $ \(chatId, (fname, itemsNewestFirst)) -> do
+    blocks <- catMaybes <$> mapM (renderChatItem idx fileIndex) itemsNewestFirst
     -- count what's rendered, not raw chat items (skipped types aren't shown)
     let convName = convNameFor chatId
         n = length blocks

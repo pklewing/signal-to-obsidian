@@ -71,6 +71,7 @@ The suite covers the hash derivation (with real verified vectors as regression g
 
 - Only `standardMessage` items are rendered. Other `chatItem` types (call events, group-membership changes, disappearing-timer notices, contact/sticker shares) are currently skipped; the message count under each note's heading counts only rendered messages.
 - Quoted replies render the reply body but not the quoted context.
+- The export is read one line at a time, but each conversation's messages are kept in memory until its note is written (notes are newest-first). A synthetic 144 MB export peaks at about 350 MB of RAM.
 - Tested against one real export's schema; other Signal versions may differ. Contributions welcome.
 
 ## License

@@ -4,6 +4,7 @@
 -- suite. Run with: cabal test
 module Main (main) where
 
+import Control.Exception (IOException)
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -419,6 +420,22 @@ main = hspec $ do
           dec "{\"chatId\":\"1\",\"authorId\":\"5\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"# big\\n---\\nok\"}}}"
       out `shouldSatisfy` infixOfM "\\# big\n\\-\\-\\-\nok"
 
+    it "renders exactly the items isRenderable accepts" $ do
+      let idx = Index Map.empty Map.empty Nothing "Me"
+          items :: [ChatItem]
+          items =
+            map
+              dec
+              [ "{\"chatId\":\"1\",\"standardMessage\":{\"text\":{\"body\":\"hi\"}}}"
+              , "{\"chatId\":\"1\",\"standardMessage\":{\"text\":{\"body\":\"   \"}}}"
+              , "{\"chatId\":\"1\",\"standardMessage\":{\"attachments\":[{\"pointer\":{}}]}}"
+              , "{\"chatId\":\"1\",\"standardMessage\":{}}"
+              , "{\"chatId\":\"1\",\"updateMessage\":{}}"
+              , "{\"chatId\":\"1\"}"
+              ]
+      rendered <- mapM (renderChatItem idx Map.empty) items
+      map isJust rendered `shouldBe` map isRenderable items
+
     it "a chatItem without standardMessage renders nothing" $ do
       let idx = Index Map.empty Map.empty Nothing "Me"
       out <-
@@ -655,3 +672,34 @@ main = hspec $ do
         -- the empty chat neither gets a note nor forces a suffix on the real one
         doesFileExist (out </> "Alex.md") `shouldReturn` True
         doesFileExist (out </> "Alex (20).md") `shouldReturn` False
+
+  describe "readExport" $ do
+    it "streams records into the index and per-chat items, newest first" $
+      withSystemTempDirectory "sig-read-" $ \tmp -> do
+        let path = tmp </> "e.jsonl"
+        BL.writeFile path $
+          BL.unlines
+            [ "{\"recipient\":{\"id\":\"1\",\"contact\":{\"profileGivenName\":\"Alex\"}}}"
+            , ""
+            , "   "
+            , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"dateSent\":\"1\",\"standardMessage\":{\"text\":{\"body\":\"old\"}}}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"dateSent\":\"2\",\"updateMessage\":{}}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"dateSent\":\"3\",\"standardMessage\":{\"text\":{\"body\":\"new\"}}}}"
+            ]
+        (idx, items) <- readExport path
+        Map.lookup "10" (idxChats idx) `shouldBe` Just "1"
+        -- blank lines skipped, non-standard items dropped, newest first
+        fmap (map ciDateSent) (Map.lookup "10" items)
+          `shouldBe` Just [Just (Millis 3), Just (Millis 1)]
+    it "reports the line number of a malformed line" $
+      withSystemTempDirectory "sig-read-" $ \tmp -> do
+        let path = tmp </> "e.jsonl"
+        BL.writeFile path (BL.unlines ["{\"version\":1}", "", "{not json"])
+        readExport path `shouldThrow` (\e -> ":3:" `List.isInfixOf` show (e :: IOException))
+    it "tolerates CRLF line endings" $
+      withSystemTempDirectory "sig-read-" $ \tmp -> do
+        let path = tmp </> "e.jsonl"
+        BL.writeFile path "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}\r\n{\"version\":1}\r\n"
+        (idx, _) <- readExport path
+        Map.lookup "10" (idxChats idx) `shouldBe` Just "1"

@@ -109,12 +109,12 @@ also can't link reliably to note names containing `#`, `^`, `[`, `]` or `|`
 
 ## Out of scope (separate follow-ups, only if wanted)
 
-- Header `_N messages_` counts all chat items, including skipped non-standard ones; consider
+- ✅ (#3) Header `_N messages_` counts all chat items, including skipped non-standard ones; consider
   counting only rendered blocks.
-- Message bodies go in as raw Markdown: a body starting with `#` turns into a heading, and a
+- ✅ (#3) Message bodies go in as raw Markdown: a body starting with `#` turns into a heading, and a
   line containing just `---` looks like the separator between messages. Consider escaping or blockquoting.
-- The whole export is decoded into memory; stream line by line for very large backups.
-- Delete the stale `.lsp/.cache` (clojure-lsp leftover, ~5 MB, already gitignored).
+- ✅ (#4) The whole export is decoded into memory; stream line by line for very large backups.
+- ✅ (deleted on the Linux machine; untracked, still gitignored for other checkouts) Delete the stale `.lsp/.cache` (clojure-lsp leftover, ~5 MB, already gitignored).
 
 ## Done when
 
