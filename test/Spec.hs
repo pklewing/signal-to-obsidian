@@ -14,7 +14,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import SignalToObsidian
-import System.Directory (createDirectoryIfMissing, doesFileExist)
+import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath (takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
 import Test.Hspec
@@ -415,10 +415,13 @@ main = hspec $ do
       argPositional a `shouldBe` ["in.jsonl", "out"]
       argFilesRoot a `shouldBe` Just "/b"
       argCopyMedia a `shouldBe` True
+    it "--prune flag" $
+      argPrune (parseArgs ["in.jsonl", "out", "--prune"]) `shouldBe` True
     it "defaults" $ do
       let a = parseArgs ["in.jsonl", "out"]
       argFilesRoot a `shouldBe` Nothing
       argCopyMedia a `shouldBe` False
+      argPrune a `shouldBe` False
 
   -- -------------------------------------------------------------------------
   -- 11. End-to-end integration: convert the bundled fixture.
@@ -435,6 +438,7 @@ main = hspec $ do
               , optOutDir = out
               , optFilesRoot = Just out
               , optCopyMedia = False
+              , optPrune = False
               , optVerbose = False
               }
         -- convert returns a summary
@@ -474,7 +478,7 @@ main = hspec $ do
             , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"first\"}}}}"
             , "{\"chatItem\":{\"chatId\":\"20\",\"authorId\":\"2\",\"dateSent\":\"2000\",\"standardMessage\":{\"text\":{\"body\":\"second\"}}}}"
             ]
-        summary <- convert (Options inPath out (Just tmp) False False)
+        summary <- convert (Options inPath out (Just tmp) False False False)
         sumConversations summary `shouldBe` 2
         doesFileExist (out </> "Unknown.md") `shouldReturn` False
         a <- TE.decodeUtf8 <$> BS.readFile (out </> "Unknown (10).md")
@@ -492,6 +496,50 @@ main = hspec $ do
             , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
             , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"1000\",\"standardMessage\":{\"attachments\":[{\"pointer\":{\"contentType\":\"image/png\"}}]}}}"
             ]
-        summary <- convert (Options inPath (tmp </> "out") (Just tmp) False False)
+        summary <- convert (Options inPath (tmp </> "out") (Just tmp) False False False)
         sumMissing summary `shouldBe` 0
         sumNoLocator summary `shouldBe` 1
+
+  describe "staleNotes" $ do
+    it "previous notes not written now are stale" $
+      staleNotes ["Alex.md", "Sam.md"] ["Alex (10).md", "Alex (31).md", "Sam.md"]
+        `shouldBe` ["Alex.md"]
+    it "case-only differences are kept (same file on macOS/Windows)" $
+      staleNotes ["alex.md"] ["Alex.md"] `shouldBe` []
+    it "never touches paths, dotfiles, or non-.md entries" $
+      staleNotes ["../x.md", "sub/x.md", ".hidden.md", "notes.txt", ".md", "ok.md"] []
+        `shouldBe` ["ok.md"]
+
+  describe "integration (--prune)" $ do
+    let chat name cid rid =
+          [ "{\"recipient\":{\"id\":\"" <> rid <> "\",\"contact\":{\"profileGivenName\":\"" <> name <> "\"}}}"
+          , "{\"chat\":{\"id\":\"" <> cid <> "\",\"recipientId\":\"" <> rid <> "\"}}"
+          , "{\"chatItem\":{\"chatId\":\"" <> cid <> "\",\"authorId\":\"" <> rid <> "\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"hi\"}}}}"
+          ]
+        run tmp out prune ls = do
+          let inPath = tmp </> "export.jsonl"
+          BL.writeFile inPath (BL.unlines ls)
+          convert (Options inPath out (Just tmp) False prune False)
+    it "removes notes renamed by collision suffixing, keeps the user's own notes" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        writeFile (out </> "My own note.md") "mine"
+        s2 <- run tmp out True (chat "Alex" "10" "1" <> chat "Alex" "31" "2")
+        sumPruned s2 `shouldBe` 1
+        doesFileExist (out </> "Alex.md") `shouldReturn` False
+        doesFileExist (out </> "Alex (10).md") `shouldReturn` True
+        doesFileExist (out </> "Alex (31).md") `shouldReturn` True
+        doesFileExist (out </> "My own note.md") `shouldReturn` True
+    it "without --prune nothing is deleted, but a later --prune still cleans up" $
+      withSystemTempDirectory "sig-prune-" $ \tmp -> do
+        let out = tmp </> "out"
+            two = chat "Alex" "10" "1" <> chat "Alex" "31" "2"
+        _ <- run tmp out False (chat "Alex" "10" "1")
+        s2 <- run tmp out False two
+        sumPruned s2 `shouldBe` 0
+        doesFileExist (out </> "Alex.md") `shouldReturn` True
+        s3 <- run tmp out True two
+        sumPruned s3 `shouldBe` 1
+        files <- listDirectory out
+        files `shouldSatisfy` notElem "Alex.md"

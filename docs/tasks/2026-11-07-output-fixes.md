@@ -124,6 +124,10 @@ also can't link reliably to note names containing `#`, `^`, `[`, `]` or `|`
 - [x] README updated for the filename suffixing and the summary output
 - [x] this note's `status:` set to `done`
 
+**Follow-up added in the same PR:** collision suffixing can rename an existing note
+(`Alex.md` → `Alex (10).md`) on a later run, leaving a stale copy. Added `--prune`,
+backed by a per-output-dir manifest, so only previously generated notes are removed.
+
 **Known limitation (not fixed):** collision detection is case-insensitive but not
 Unicode-normalization-aware (NFC vs NFD), which APFS also treats as equal. Fixing it
 would need `text-icu`.
