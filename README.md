@@ -40,6 +40,12 @@ Arguments:
 
 Open `<output-dir>` as an Obsidian vault (or drop it inside an existing one) and the embeds resolve.
 
+## Output
+
+- **Filenames.** Each note is named after the conversation, with characters that are illegal on common filesystems or that break Obsidian links (`\ / : * ? " < > | # ^ [ ]`) removed, and leading/trailing dots trimmed.
+- **Name collisions.** If several conversations end up with the same name (compared case-insensitively, since macOS and Windows filesystems are case-insensitive), every one of them gets its chat id appended, e.g. `Unknown (10).md` and `Unknown (20).md`, so none overwrite each other.
+- **Summary.** After converting, the tool reports how many attachments were not found under `<files-root>/files/` (rendered as *attachment unavailable* placeholders) and, separately, how many had no locator info at all (skipped).
+
 ## How attachment paths are derived
 
 Signal stores backup media under `files/<first two hex chars>/<hash>.<ext>`. The hash is **not** a digest of the file contents; it is:
@@ -53,7 +59,7 @@ where `plaintextHash` and `localKey` come from each attachment's `locatorInfo` b
 ## Running the tests
 
 ```bash
-cabal test
+cabal test --enable-tests
 ```
 
 The suite covers the hash derivation (with real verified vectors as regression guards), name resolution, extension handling, filename sanitization, index building, reaction ordering, end-to-end rendering, a filesystem round-trip, and an integration pass over a synthetic fixture (`test/fixtures/sample.jsonl`, which contains only fabricated data).
