@@ -185,10 +185,22 @@ main = hspec $ do
       sanitizeFilename "name<>:\"/\\|?*part" `shouldBe` "namepart"
     it "whitespace collapsed and trimmed" $
       sanitizeFilename "  a    b  " `shouldBe` "a b"
+    it "Obsidian link syntax characters stripped" $ do
+      sanitizeFilename "Team #1 [old]" `shouldBe` "Team 1 old"
+      sanitizeFilename "^caret" `shouldBe` "caret"
+      sanitizeFilename "a|b" `shouldBe` "ab"
+    it "leading dots stripped so the note isn't hidden" $ do
+      sanitizeFilename ".hidden" `shouldBe` "hidden"
+      sanitizeFilename ". . spaced" `shouldBe` "spaced"
+    it "trailing dots and spaces stripped (Windows rejects them)" $
+      sanitizeFilename "Trip..." `shouldBe` "Trip"
+    it "inner dots kept" $
+      sanitizeFilename "v1.2 notes" `shouldBe` "v1.2 notes"
     it "empty / all-illegal falls back to a default" $ do
       sanitizeFilename "" `shouldBe` "conversation"
       sanitizeFilename "/////" `shouldBe` "conversation"
       sanitizeFilename "   " `shouldBe` "conversation"
+      sanitizeFilename "..." `shouldBe` "conversation"
 
   describe "assignFilenames" $ do
     it "unique names are unchanged" $

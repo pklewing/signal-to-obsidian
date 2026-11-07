@@ -423,11 +423,18 @@ recipientDisplayName r selfName
 -- Filesystem-safe filenames
 -- ---------------------------------------------------------------------------
 
+-- | Make a display name safe as both a filename and an Obsidian note name.
+--
+-- Strips characters illegal on common filesystems plus those Obsidian can't
+-- link to (@#@ heading, @^@ block ref, @[@ @]@ wikilink, @|@ alias), collapses
+-- whitespace, drops leading dots (they hide the note in Obsidian) and
+-- trailing dots/spaces (rejected by Windows). Falls back to @"conversation"@.
 sanitizeFilename :: Text -> Text
 sanitizeFilename s =
-  let legal = T.filter (`notElem` ("\\/:*?\"<>|" :: String)) s -- chars illegal on common FS
+  let legal = T.filter (`notElem` ("\\/:*?\"<>|#^[]" :: String)) s
       collapsed = T.unwords (T.words legal) -- collapse whitespace + trim
-   in if T.null collapsed then "conversation" else collapsed
+      trimmed = T.dropWhileEnd (\c -> c == '.' || isSpace c) (T.dropWhile (\c -> c == '.' || isSpace c) collapsed)
+   in if T.null trimmed then "conversation" else trimmed
 
 -- | Assign every chat a unique output filename (with @.md@), keyed by chat id.
 --
