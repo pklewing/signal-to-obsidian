@@ -1,0 +1,4 @@
+# Default owner for everything; GitHub auto-requests their review on PRs.
+# CLAUDE.md is listed explicitly: Claude Code executes guidance from it, so changes need owner review.
+*          @pklewing
+/CLAUDE.md @pklewing
