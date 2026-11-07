@@ -4,6 +4,7 @@
 -- suite. Run with: cabal test
 module Main (main) where
 
+import Control.Exception (IOException)
 import qualified Data.Aeson as A
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as BL
@@ -17,7 +18,6 @@ import SignalToObsidian
 import System.Directory (createDirectoryIfMissing, doesFileExist, listDirectory)
 import System.FilePath (takeFileName, (</>))
 import System.IO.Temp (withSystemTempDirectory)
-import Control.Exception (IOException)
 import Test.Hspec
 
 -- Decode a JSON literal into one of the export record types. The literals in
@@ -419,6 +419,22 @@ main = hspec $ do
         renderChatItem idx Map.empty $
           dec "{\"chatId\":\"1\",\"authorId\":\"5\",\"dateSent\":\"1000\",\"standardMessage\":{\"text\":{\"body\":\"# big\\n---\\nok\"}}}"
       out `shouldSatisfy` infixOfM "\\# big\n\\-\\-\\-\nok"
+
+    it "renders exactly the items isRenderable accepts" $ do
+      let idx = Index Map.empty Map.empty Nothing "Me"
+          items :: [ChatItem]
+          items =
+            map
+              dec
+              [ "{\"chatId\":\"1\",\"standardMessage\":{\"text\":{\"body\":\"hi\"}}}"
+              , "{\"chatId\":\"1\",\"standardMessage\":{\"text\":{\"body\":\"   \"}}}"
+              , "{\"chatId\":\"1\",\"standardMessage\":{\"attachments\":[{\"pointer\":{}}]}}"
+              , "{\"chatId\":\"1\",\"standardMessage\":{}}"
+              , "{\"chatId\":\"1\",\"updateMessage\":{}}"
+              , "{\"chatId\":\"1\"}"
+              ]
+      rendered <- mapM (renderChatItem idx Map.empty) items
+      map isJust rendered `shouldBe` map isRenderable items
 
     it "a chatItem without standardMessage renders nothing" $ do
       let idx = Index Map.empty Map.empty Nothing "Me"

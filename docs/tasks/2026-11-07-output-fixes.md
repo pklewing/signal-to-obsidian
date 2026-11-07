@@ -114,7 +114,7 @@ also can't link reliably to note names containing `#`, `^`, `[`, `]` or `|`
 - ✅ (#3) Message bodies go in as raw Markdown: a body starting with `#` turns into a heading, and a
   line containing just `---` looks like the separator between messages. Consider escaping or blockquoting.
 - ✅ (#4) The whole export is decoded into memory; stream line by line for very large backups.
-- ✅ (done locally; untracked) Delete the stale `.lsp/.cache` (clojure-lsp leftover, ~5 MB, already gitignored).
+- ✅ (deleted on the Linux machine; untracked, still gitignored for other checkouts) Delete the stale `.lsp/.cache` (clojure-lsp leftover, ~5 MB, already gitignored).
 
 ## Done when
 

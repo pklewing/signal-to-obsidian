@@ -55,6 +55,8 @@ module SignalToObsidian
   , renderReactions
   , renderAttachments
   , renderChatItem
+  , isRenderable
+  , chatKey
 
     -- * Stale-note pruning
   , manifestFileName
@@ -579,8 +581,8 @@ readExport path = withBinaryFile path ReadMode $ \h ->
                 Right rec ->
                   let items' = case recChatItem rec of
                         Just ci
-                          | isJust (ciStandardMessage ci) ->
-                              Map.insertWith (<>) (maybe "" unId (ciChatId ci)) [ci] items
+                          | isRenderable ci ->
+                              Map.insertWith (<>) (chatKey ci) [ci] items
                         _ -> items
                    in loop (lineNo + 1) (indexStep idx rec) items'
    in loop 1 emptyIndex Map.empty
@@ -665,7 +667,18 @@ renderAttachments fileIndex attachments =
             -- no locator at all: nothing renderable
             _ -> Nothing
 
--- | Render one chatItem to a Markdown block, or Nothing if nothing to show.
+-- | Whether 'renderChatItem' produces a block for this item. 'readExport'
+-- keeps only these, which is why every chat it returns gets a non-empty
+-- note. Keep the two in sync when adding support for more item types.
+isRenderable :: ChatItem -> Bool
+isRenderable = isJust . ciStandardMessage
+
+-- | The chat an item belongs to (@""@ if the export omits it).
+chatKey :: ChatItem -> Text
+chatKey = maybe "" unId . ciChatId
+
+-- | Render one chatItem to a Markdown block; Nothing exactly when not
+-- 'isRenderable'.
 renderChatItem :: Index -> Map Text FilePath -> ChatItem -> IO (Maybe Text)
 renderChatItem idx fileIndex ci = case ciStandardMessage ci of
   Nothing -> pure Nothing
