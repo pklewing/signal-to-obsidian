@@ -425,6 +425,7 @@ main = hspec $ do
         -- convert returns a summary
         sumConversations summary `shouldBe` 2
         sumMissing summary `shouldBe` 1 -- the one PDF attachment, no files/ present
+        sumNoLocator summary `shouldBe` 0 -- the fixture's only attachment has locator info
         -- expected per-conversation files are written
         doesFileExist (out </> "Alex Doe.md") `shouldReturn` True
         doesFileExist (out </> "Weekend Trip.md") `shouldReturn` True
@@ -465,3 +466,17 @@ main = hspec $ do
         b <- TE.decodeUtf8 <$> BS.readFile (out </> "Unknown (20).md")
         a `shouldSatisfy` T.isInfixOf "first"
         b `shouldSatisfy` T.isInfixOf "second"
+
+  describe "integration (attachment counting)" $
+    it "attachment without locatorInfo counts as no-locator, not missing" $
+      withSystemTempDirectory "sig-loc-" $ \tmp -> do
+        let inPath = tmp </> "export.jsonl"
+        BL.writeFile inPath $
+          BL.unlines
+            [ "{\"recipient\":{\"id\":\"1\",\"contact\":{\"profileGivenName\":\"Alex\"}}}"
+            , "{\"chat\":{\"id\":\"10\",\"recipientId\":\"1\"}}"
+            , "{\"chatItem\":{\"chatId\":\"10\",\"authorId\":\"1\",\"dateSent\":\"1000\",\"standardMessage\":{\"attachments\":[{\"pointer\":{\"contentType\":\"image/png\"}}]}}}"
+            ]
+        summary <- convert (Options inPath (tmp </> "out") (Just tmp) False False)
+        sumMissing summary `shouldBe` 0
+        sumNoLocator summary `shouldBe` 1

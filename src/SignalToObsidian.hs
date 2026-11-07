@@ -69,12 +69,11 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Char8 as BC
 import Data.Char (isSpace)
-import Data.IORef (modifyIORef', newIORef, readIORef)
 import Data.List (isPrefixOf, sortOn)
 import qualified Data.List as List
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
-import Data.Maybe (catMaybes, fromMaybe, isJust, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Scientific (floatingOrInteger)
 import qualified Data.Set as Set
 import Data.Text (Text)
@@ -593,6 +592,10 @@ data Options = Options
 data Summary = Summary
   { sumConversations :: Int
   , sumMissing :: Int
+  -- ^ attachments with a derivable hash but no file in the index
+  -- (rendered as an "attachment unavailable" placeholder)
+  , sumNoLocator :: Int
+  -- ^ attachments without locator info, so no derivable hash (not rendered)
   , sumIndexed :: Int
   }
   deriving (Show, Eq)
@@ -634,7 +637,15 @@ convert opts = do
           Nothing -> "chat-" <> chatId
       -- resolve all filenames up front so same-named chats can't overwrite each other
       fileNames = assignFilenames [(c, convNameFor c) | c <- Map.keys itemsByChat]
-  missingRef <- newIORef (0 :: Int)
+      allAttachments =
+        [ att
+        | items <- Map.elems itemsByChat
+        , ci <- items
+        , att <- maybe [] smAttachments (ciStandardMessage ci)
+        ]
+      hashes = map attachmentHash allAttachments
+      noLocator = length (filter isNothing hashes)
+      missing = length [() | Just h <- hashes, not (Map.member h fileIndex)]
   forM_ (Map.toList itemsByChat) $ \(chatId, itemsNewestFirst) -> do
     let convName = convNameFor chatId
         fname = Map.findWithDefault (T.unpack (sanitizeFilename convName) <> ".md") chatId fileNames
@@ -644,7 +655,7 @@ convert opts = do
     forM_ itemsNewestFirst $ \ci ->
       forM_ (maybe [] smAttachments (ciStandardMessage ci)) $ \att ->
         case resolveOnDisk fileIndex att of
-          Nothing -> modifyIORef' missingRef (+ 1)
+          Nothing -> pure () -- counted above
           Just src -> when (optCopyMedia opts) $ do
             let h = fromMaybe "" (attachmentHash att)
                 dst = outDir </> "files" </> T.unpack (T.take 2 h) </> takeFileName src
@@ -654,17 +665,19 @@ convert opts = do
     let content = header <> "\n" <> T.intercalate "\n\n---\n\n" blocks <> "\n"
     BS.writeFile (outDir </> fname) (TE.encodeUtf8 content)
     when (optVerbose opts) $ printf "Wrote %s  (%d messages)\n" fname n
-  missing <- readIORef missingRef
   when (optVerbose opts) $ do
     printf "\nDone. %d conversation file(s) in %s\n" (Map.size itemsByChat) outDir
     when (missing > 0) $
       printf
-        "Note: %d attachment file(s) referenced were not found under %s/files/ — links are still written.\n"
+        "Note: %d attachment(s) were not found under %s/files/ and are shown as \"attachment unavailable\" placeholders.\n"
         missing
         filesRoot
+    when (noLocator > 0) $
+      printf "Note: %d attachment(s) had no locator info and were skipped.\n" noLocator
   pure
     Summary
       { sumConversations = Map.size itemsByChat
       , sumMissing = missing
+      , sumNoLocator = noLocator
       , sumIndexed = Map.size fileIndex
       }
